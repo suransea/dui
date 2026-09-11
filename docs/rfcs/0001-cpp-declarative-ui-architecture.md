@@ -113,25 +113,16 @@ semantics queues. Relayout and repaint boundaries constrain invalidation.
 
 ```cpp
 struct TodoPage {
-    std::vector<Todo> todos;
+  std::vector<Todo> todos;
 
-    auto build(dui::BuildContext& context) const {
-        auto filter = context.state<"filter">(Filter::all);
+  auto build(dui::BuildContext& context) const {
+    auto filter = context.state<"filter">(Filter::all);
 
-        return dui::VStack{
-            FilterBar{filter.get(), [filter](Filter next) mutable {
-                filter.set(next);
-            }},
-            dui::ForEach{
-                todos,
-                dui::key<&Todo::id>,
-                [](const Todo& todo) { return TodoRow{todo}; }
-            },
-            dui::optional(todos.empty(), [] {
-                return EmptyState{"No todos"};
-            })
-        };
-    }
+    return dui::VStack{
+      FilterBar{filter.get(), [filter](Filter next) mutable { filter.set(next); }},
+      dui::ForEach{todos, dui::key<&Todo::id>, [](const Todo& todo) { return TodoRow{todo}; }},
+      dui::optional(todos.empty(), [] { return EmptyState{"No todos"}; })};
+  }
 };
 ```
 

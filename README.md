@@ -28,16 +28,15 @@ linear in the total child count.
 
 ```cpp
 struct Counter {
-    auto build(dui::BuildContext& context) const {
-        auto count = context.state<"count">(0);
+  auto build(dui::BuildContext& context) const {
+    auto count = context.state<"count">(0);
 
-        return dui::VStack{
-            dui::Text{"Count: " + std::to_string(count.get())},
-            dui::Text{"Increment", [count]() mutable {
-                count.update([](int value) { return value + 1; });
-            }},
-        };
-    }
+    return dui::VStack{
+      dui::Text{"Count: " + std::to_string(count.get())},
+      dui::Text{"Increment",
+                [count]() mutable { count.update([](int value) { return value + 1; }); }},
+    };
+  }
 };
 ```
 
