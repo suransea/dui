@@ -1,0 +1,185 @@
+# Implementation Status
+
+## M0: Headless Architecture
+
+Status: implemented and verified.
+
+The first vertical slice contains:
+
+- C++23 View values: `Text`, `VStack`, `Fragment`, `Optional`, `Choice`, and
+  keyed `ForEach`;
+- explicit component `build(BuildContext&)` functions and a public `View`
+  concept;
+- persistent Elements with type-and-key reconciliation;
+- named typed state slots using fixed-string non-type template parameters;
+- lifetime-checked state handles;
+- automatic Signal read tracking during component builds;
+- dependency replacement after conditional reads;
+- coalesced, depth-ordered dirty rebuilds;
+- deterministic headless tree inspection;
+- duplicate-key validation that occurs before list mutation.
+
+The test executable covers every M0 acceptance criterion from RFC 0001,
+including same-type Choice alternatives and stateful keyed-list reorder.
+
+## M1: Box Rendering
+
+Status: implemented and verified as a headless framework slice.
+
+The rendering slice contains:
+
+- platform-neutral `Offset`, `Size`, `Rect`, `Insets`, and normalized
+  `BoxConstraints`;
+- persistent `RenderObject`, `RenderBox`, `BoxParentData`, and `RenderView`;
+- owner-managed layout and paint dirty queues;
+- strongly validated render-tree attachment with cycle, duplicate, null,
+  cross-owner, and multi-parent rejection;
+- `RenderText`, `RenderImage`, `RenderVStack`, `RenderHStack`, `RenderStack`,
+  `RenderPadding`, and `RenderColoredBox`;
+- deterministic text, image, and rectangle DisplayList commands;
+- cached DisplayLists when no paint is dirty;
+- reverse-paint-order hit testing with an ancestor path;
+- pointer down/up activation with generation-safe RenderObject identity;
+- `Backend`, `NativeView`, and `Renderer` platform boundaries;
+- transparent Element flattening into the persistent render tree.
+
+Tests cover every M1 acceptance criterion added to RFC 0001. The ownership
+tests also exercise RenderObjects that outlive their RenderOwner.
+
+## M2: Interaction
+
+Status: implementation complete; platform-native verification remains in
+progress.
+
+Implemented foundation:
+
+- reusable Element `DependencySource` subscriptions shared by Signal and
+  inherited values;
+- typed `EnvironmentScope` values with nearest-ancestor lookup;
+- equal-component build skipping that still stores the newest descriptor;
+- preservation of state writes scheduled during an active build;
+- BuildOwner reconciliation reentrancy rejection;
+- GestureArena close/eager-winner/reject/sweep/cancel semantics;
+- callback reentrancy protection for same-pointer arena recreation;
+- lifetime-safe FocusNode/FocusManager relationships and key bubbling;
+- focus route snapshots and safe handler self-replacement;
+- weak-client, generation-addressed text input session contracts;
+- UTF-8 byte-offset selection and composing-range validation;
+- named, move-only RAII resources owned by Elements;
+- an explicit Element cancellation phase before any resource destruction;
+- deterministic TickerScheduler and forward/reverse AnimationController;
+- lazy `Task<T>`/`Task<void>` coroutines and a deterministic `ManualExecutor`,
+  including safe invalidation of queued and currently resumed Element work;
+- declarative `GestureDetector`/`on_tap` activation with leaf-to-root bubbling;
+- declarative `FocusView`/`focusable`, Element-owned FocusNodes, mount-only
+  autofocus, click-to-focus, and key dispatch through BuildOwner;
+- down-to-up/cancel enrollment of declarative tap routes in GestureArena, with
+  generation-safe intersection of actionable down/up hit paths;
+- strict UTF-8 scalar validation for editing state and ranges;
+- a conditional Win32 IMM32 text-input adapter supporting Unicode character
+  editing, composition state/commit/cancel, actions, session replacement, weak
+  clients, and DPR-scaled candidate/composition positioning.
+
+The input and lifecycle test executables cover the M2 foundation acceptance
+criteria in RFC 0001. Rendering tests additionally cover declarative gesture
+and focus integration, tree replacement during callbacks, pointer reentrancy,
+focus identity across reconciliation, cancellation, and movement between child
+hit regions of one detector. The Win32 adapter and its native test executable
+cross-compile and link warning-free with Zig's `x86_64-windows-gnu` target, but
+have not yet been executed against a real Windows HWND/IME in this environment.
+
+## M3: Production Rendering
+
+Status: protocol-separation and retained-rendering slices implemented and
+verified; production raster backend remains in progress.
+
+The first M3 slice moves `BoxConstraints`, `Size`, `BoxParentData`, child box
+layout, and rectangular hit testing out of protocol-neutral `RenderObject` and
+into `RenderBox`. RenderBox protocol validation is non-overridable and rejects
+incompatible children before any parent/child mutation. The RenderView root
+remains box-specific, providing the explicit seam needed before adding a future
+box-to-sliver viewport.
+
+Normal and ASan/UBSan runs cover unchanged box layout, paint, hit testing,
+pointer interaction, owner lifetime, and transactional rejection of a non-box
+child. Compile-time assertions verify that a non-box RenderObject exposes no box
+geometry API.
+
+The retained-rendering slice adds immutable `LayerTree`, `ContainerLayer`,
+`OffsetLayer`, and `DisplayListLayer` snapshots. `BuildOwner::layer_frame()` is
+the primary frame API; the existing `frame()` and `DisplayListRenderer` flatten
+layers for compatibility. Declarative `RepaintBoundary` caches boundary-local
+content, stops paint invalidation, and propagates composition-only dirtiness to
+ancestor boundaries. Ordered paint chunks preserve interleaving around nested
+boundaries, while stable RenderObject IDs are used only by the UI-thread cache
+recipe and never escape into immutable submitted layers.
+
+Tests verify clean root-layer identity reuse, old snapshot validity after
+updates and unmount, ordered/translated flattening, nested composition without
+ancestor or sibling repaint, moved-boundary local-layer reuse, accumulated
+non-boundary offsets, transactional layout retry, and drained paint/composition
+queues. Paint-time invalidation is explicitly rejected until generation-based
+paint reentrancy is designed.
+
+The raster-submission slice adds an owned `RasterThread` worker. Concurrent
+submit/wait/status calls synchronize through a FIFO queue of immutable
+LayerTrees. Callback-safe `request_stop()` cancels queued frames while allowing
+the active render to finish; externally serialized destruction joins the worker.
+Renderer failure is terminal, cancels pending work, and is rethrown to the owner
+thread. Backend tests verify FIFO submission, raster-thread affinity, immutable
+snapshots, callback-requested stop, quiescent shutdown, and failure propagation
+under normal, ASan/UBSan, and ThreadSanitizer runs.
+
+The next backend-preparation slice defines `RasterSurface` acquisition and an
+exactly-once `SurfaceFrame` transaction. Requests carry logical/physical size,
+DPR, and surface generation; acquisitions distinguish unavailable, out-of-date,
+and lost surfaces. Ready frames validate RGBA8888 sRGB premultiplied format,
+stride, extent, generation, and one stable CPU pixel mapping. These contracts
+are tested fixtures and are not described as a Skia backend.
+
+RasterThread now consumes this surface contract directly. Each queued item
+captures its LayerTree and SurfaceRequest, acquires and validates a frame on the
+raster worker, invokes a worker-constructed SurfaceRenderer, and presents or
+abandons exactly once. Copyable FrameTickets report presented, unavailable,
+out-of-date, or canceled completion to repeated/concurrent waiters; surface loss
+and renderer failure remain terminal. SurfaceRenderer construction and
+destruction are raster-thread-affine, while RasterSurface is explicitly a
+thread-safe platform bridge.
+
+## Verification
+
+The prototype has been built and tested with:
+
+- GCC 15.2;
+- Clang 21.1;
+- Zig 0.14.1 bundled Clang in direct C++23 compatibility mode;
+- Clang AddressSanitizer;
+- Clang UndefinedBehaviorSanitizer.
+
+## Known Prototype Constraints
+
+- Components and state values are currently copy constructible because the
+  prototype stores component descriptors in `std::any`.
+- A failed user build is not transactional yet. Error boundaries and atomic
+  fallback installation are planned before a platform frame loop is added.
+- Element allocation uses the standard allocator. PMR arenas and SBO-based
+  owning type erasure will follow profiling.
+- The current DisplayList is a deterministic test representation rather than a
+  GPU command encoding.
+- `DisplayListRenderer` consumes LayerTree on the raster worker but still
+  flattens it to the headless DisplayList representation; a GPU layer consumer
+  is not implemented yet.
+- Pointer routing currently implements arena-backed tap recognition and
+  leaf-to-root activation. Drag recognizers, touch slop, capture, and hover
+  policies remain future interaction work.
+- UI-thread confinement is contractual rather than executor-enforced.
+- Environment references are build-scoped and must not be retained by a
+  component or callback.
+- The only native text-input adapter is currently Win32 IMM32. Other platforms
+  still require adapters.
+
+## Next Milestone
+
+Run the Win32 text-input suite against a real message-pumped HWND and native
+IMEs to finish M2 verification. M3 continues with raster-thread submission, a
+production GPU layer consumer, Sliver layout/virtualization, and semantics.
