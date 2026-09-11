@@ -57,6 +57,28 @@ struct Stack {
 template<class... Children>
 Stack(Children...) -> Stack<Children...>;
 
+template<class... Slivers>
+struct Viewport {
+    double scroll_offset;
+    std::tuple<Slivers...> children;
+
+    explicit Viewport(double offset, Slivers... values) :
+        scroll_offset(offset), children(std::move(values)...) {}
+};
+
+template<class... Slivers>
+Viewport(double, Slivers...) -> Viewport<Slivers...>;
+
+template<class Child>
+struct SliverToBoxAdapter {
+    Child child;
+
+    explicit SliverToBoxAdapter(Child value) : child(std::move(value)) {}
+};
+
+template<class Child>
+SliverToBoxAdapter(Child) -> SliverToBoxAdapter<Child>;
+
 template<class... Children>
 struct Fragment {
     std::tuple<Children...> children;
@@ -273,6 +295,12 @@ inline constexpr bool is_builtin_view<HStack<Children...>> = true;
 template<class... Children>
 inline constexpr bool is_builtin_view<Stack<Children...>> = true;
 
+template<class... Slivers>
+inline constexpr bool is_builtin_view<Viewport<Slivers...>> = true;
+
+template<class Child>
+inline constexpr bool is_builtin_view<SliverToBoxAdapter<Child>> = true;
+
 template<class... Children>
 inline constexpr bool is_builtin_view<Fragment<Children...>> = true;
 
@@ -308,6 +336,87 @@ concept View = is_builtin_view<std::remove_cvref_t<T>> || Component<std::remove_
 
 namespace detail {
 
+template<class T>
+struct ViewProtocol {
+    static constexpr bool box = false;
+    static constexpr bool sliver = false;
+};
+
+template<> struct ViewProtocol<Text> { static constexpr bool box = true; static constexpr bool sliver = false; };
+template<> struct ViewProtocol<Image> { static constexpr bool box = true; static constexpr bool sliver = false; };
+template<class... C> struct ViewProtocol<VStack<C...>> { static constexpr bool box = true; static constexpr bool sliver = false; };
+template<class... C> struct ViewProtocol<HStack<C...>> { static constexpr bool box = true; static constexpr bool sliver = false; };
+template<class... C> struct ViewProtocol<Stack<C...>> { static constexpr bool box = true; static constexpr bool sliver = false; };
+template<class... S> struct ViewProtocol<Viewport<S...>> { static constexpr bool box = true; static constexpr bool sliver = false; };
+template<class C> struct ViewProtocol<SliverToBoxAdapter<C>> { static constexpr bool box = false; static constexpr bool sliver = true; };
+template<class C> struct ViewProtocol<Padding<C>> { static constexpr bool box = true; static constexpr bool sliver = false; };
+template<class C> struct ViewProtocol<ColoredBox<C>> { static constexpr bool box = true; static constexpr bool sliver = false; };
+template<class C> struct ViewProtocol<RepaintBoundary<C>> { static constexpr bool box = true; static constexpr bool sliver = false; };
+template<class C> struct ViewProtocol<GestureDetector<C>> { static constexpr bool box = true; static constexpr bool sliver = false; };
+template<class C> struct ViewProtocol<FocusView<C>> { static constexpr bool box = true; static constexpr bool sliver = false; };
+
+template<class T>
+consteval bool has_box_protocol();
+
+template<class T>
+consteval bool has_sliver_protocol();
+
+template<class... C>
+struct ViewProtocol<Fragment<C...>> {
+    static constexpr bool box = (has_box_protocol<C>() && ...);
+    static constexpr bool sliver = (has_sliver_protocol<C>() && ...);
+};
+
+template<class C, class... V>
+struct ViewProtocol<EnvironmentScope<C, V...>> {
+    static constexpr bool box = has_box_protocol<C>();
+    static constexpr bool sliver = has_sliver_protocol<C>();
+};
+
+template<class V>
+struct ViewProtocol<Optional<V>> {
+    static constexpr bool box = has_box_protocol<V>();
+    static constexpr bool sliver = has_sliver_protocol<V>();
+};
+
+template<class L, class R>
+struct ViewProtocol<Choice<L, R>> {
+    static constexpr bool box = has_box_protocol<L>() && has_box_protocol<R>();
+    static constexpr bool sliver = has_sliver_protocol<L>() && has_sliver_protocol<R>();
+};
+
+template<class Range, class KeyFunction, class Builder>
+struct ViewProtocol<ForEach<Range, KeyFunction, Builder>> {
+    using Child = std::decay_t<std::invoke_result_t<
+        const Builder&,
+        std::ranges::range_reference_t<const Range>
+    >>;
+    static constexpr bool box = has_box_protocol<Child>();
+    static constexpr bool sliver = has_sliver_protocol<Child>();
+};
+
+template<class T>
+consteval bool has_box_protocol() {
+    using V = std::remove_cvref_t<T>;
+    if constexpr (Component<V>) {
+        using Child = decltype(std::declval<const V&>().build(std::declval<BuildContext&>()));
+        return has_box_protocol<Child>();
+    } else {
+        return ViewProtocol<V>::box;
+    }
+}
+
+template<class T>
+consteval bool has_sliver_protocol() {
+    using V = std::remove_cvref_t<T>;
+    if constexpr (Component<V>) {
+        using Child = decltype(std::declval<const V&>().build(std::declval<BuildContext&>()));
+        return has_sliver_protocol<Child>();
+    } else {
+        return ViewProtocol<V>::sliver;
+    }
+}
+
 template<class V>
 [[nodiscard]] constexpr std::string_view view_name() {
     if constexpr (std::same_as<std::remove_cvref_t<V>, Text>) {
@@ -329,6 +438,12 @@ void update_view(Element&, const HStack<Children...>&, BuildOwner&);
 
 template<class... Children>
 void update_view(Element&, const Stack<Children...>&, BuildOwner&);
+
+template<class... Slivers>
+void update_view(Element&, const Viewport<Slivers...>&, BuildOwner&);
+
+template<class Child>
+void update_view(Element&, const SliverToBoxAdapter<Child>&, BuildOwner&);
 
 template<class... Children>
 void update_view(Element&, const Fragment<Children...>&, BuildOwner&);
@@ -388,6 +503,16 @@ template<class... Children>
 template<class... Children>
 [[nodiscard]] std::string debug_name(const Stack<Children...>&) {
     return "Stack";
+}
+
+template<class... Slivers>
+[[nodiscard]] std::string debug_name(const Viewport<Slivers...>&) {
+    return "Viewport";
+}
+
+template<class Child>
+[[nodiscard]] std::string debug_name(const SliverToBoxAdapter<Child>&) {
+    return "SliverToBoxAdapter";
 }
 
 template<class... Children>
@@ -498,20 +623,47 @@ void update_static_children(Element& element, const Tuple& tuple, BuildOwner& ow
 
 template<class... Children>
 void update_view(Element& element, const VStack<Children...>& view, BuildOwner& owner) {
+    static_assert((has_box_protocol<Children>() && ...), "VStack children must use the box protocol");
     static_cast<void>(ElementAccess::ensure_render_object<RenderVStack>(element, owner));
     update_static_children(element, view.children, owner);
 }
 
 template<class... Children>
 void update_view(Element& element, const HStack<Children...>& view, BuildOwner& owner) {
+    static_assert((has_box_protocol<Children>() && ...), "HStack children must use the box protocol");
     static_cast<void>(ElementAccess::ensure_render_object<RenderHStack>(element, owner));
     update_static_children(element, view.children, owner);
 }
 
 template<class... Children>
 void update_view(Element& element, const Stack<Children...>& view, BuildOwner& owner) {
+    static_assert((has_box_protocol<Children>() && ...), "Stack children must use the box protocol");
     static_cast<void>(ElementAccess::ensure_render_object<RenderStack>(element, owner));
     update_static_children(element, view.children, owner);
+}
+
+template<class... Slivers>
+void update_view(Element& element, const Viewport<Slivers...>& view, BuildOwner& owner) {
+    static_assert(
+        (has_sliver_protocol<Slivers>() && ...),
+        "Viewport children must use the Sliver protocol"
+    );
+    ElementAccess::ensure_render_object<RenderViewport>(element, owner, view.scroll_offset)
+        .set_scroll_offset(view.scroll_offset);
+    update_static_children(element, view.children, owner);
+}
+
+template<class Child>
+void update_view(Element& element, const SliverToBoxAdapter<Child>& view, BuildOwner& owner) {
+    static_assert(has_box_protocol<Child>(), "SliverToBoxAdapter child must use the box protocol");
+    static_cast<void>(
+        ElementAccess::ensure_render_object<RenderSliverToBoxAdapter>(element, owner)
+    );
+    auto& children = ElementAccess::children(element);
+    if (children.empty()) {
+        children.push_back(nullptr);
+    }
+    reconcile_child(children.front(), view.child, owner, &element, Key{});
 }
 
 template<class... Children>
@@ -542,6 +694,7 @@ void update_view(
 
 template<class Child>
 void update_view(Element& element, const Padding<Child>& view, BuildOwner& owner) {
+    static_assert(has_box_protocol<Child>(), "Padding child must use the box protocol");
     ElementAccess::ensure_render_object<RenderPadding>(element, owner, view.insets)
         .set_insets(view.insets);
     auto& children = ElementAccess::children(element);
@@ -553,6 +706,7 @@ void update_view(Element& element, const Padding<Child>& view, BuildOwner& owner
 
 template<class Child>
 void update_view(Element& element, const ColoredBox<Child>& view, BuildOwner& owner) {
+    static_assert(has_box_protocol<Child>(), "ColoredBox child must use the box protocol");
     ElementAccess::ensure_render_object<RenderColoredBox>(element, owner, view.color)
         .set_color(view.color);
     auto& children = ElementAccess::children(element);
@@ -564,6 +718,7 @@ void update_view(Element& element, const ColoredBox<Child>& view, BuildOwner& ow
 
 template<class Child>
 void update_view(Element& element, const RepaintBoundary<Child>& view, BuildOwner& owner) {
+    static_assert(has_box_protocol<Child>(), "RepaintBoundary child must use the box protocol");
     ElementAccess::ensure_render_object<RenderRepaintBoundary>(element, owner);
     auto& children = ElementAccess::children(element);
     if (children.empty()) {
@@ -574,6 +729,7 @@ void update_view(Element& element, const RepaintBoundary<Child>& view, BuildOwne
 
 template<class Child>
 void update_view(Element& element, const GestureDetector<Child>& view, BuildOwner& owner) {
+    static_assert(has_box_protocol<Child>(), "GestureDetector child must use the box protocol");
     auto& action = ElementAccess::ensure_render_object<RenderActionBox>(
         element,
         owner,
@@ -591,6 +747,7 @@ void update_view(Element& element, const GestureDetector<Child>& view, BuildOwne
 
 template<class Child>
 void update_view(Element& element, const FocusView<Child>& view, BuildOwner& owner) {
+    static_assert(has_box_protocol<Child>(), "FocusView child must use the box protocol");
     const bool is_new_focus_node = !ElementAccess::has_focus_node(element);
     const std::shared_ptr<FocusNode> focus_node = ElementAccess::ensure_focus_node(
         element,
@@ -800,6 +957,7 @@ void reconcile_child(
 template<class V>
 void BuildOwner::render(const V& view) {
     static_assert(View<V>, "BuildOwner::render requires a DUI View or Component");
+    static_assert(detail::has_box_protocol<V>(), "BuildOwner root must use the box protocol");
     if (reconciling_) {
         throw std::logic_error("BuildOwner does not allow reentrant render or flush");
     }

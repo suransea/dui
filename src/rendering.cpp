@@ -37,6 +37,16 @@ void append_layer(const Layer& layer, DisplayListBuilder& builder, Offset offset
         append_layer(*translated->child(), builder, offset + translated->offset());
         break;
     }
+    case Layer::Kind::clip_rect: {
+        const auto* clipped = dynamic_cast<const ClipRectLayer*>(&layer);
+        if (clipped == nullptr) {
+            throw std::logic_error("Layer kind does not match ClipRectLayer type");
+        }
+        builder.push_clip_rect({clipped->clip_rect().origin + offset, clipped->clip_rect().size});
+        append_layer(*clipped->child(), builder, offset);
+        builder.pop_clip();
+        break;
+    }
     case Layer::Kind::display_list: {
         const auto* display_layer = dynamic_cast<const DisplayListLayer*>(&layer);
         if (display_layer == nullptr) {
@@ -50,11 +60,15 @@ void append_layer(const Layer& layer, DisplayListBuilder& builder, Offset offset
                     builder.draw_text(value.text, value.offset + offset);
                 } else if constexpr (std::same_as<T, DrawRectCommand>) {
                     builder.draw_rect({value.rect.origin + offset, value.rect.size}, value.color);
-                } else {
+                } else if constexpr (std::same_as<T, DrawImageCommand>) {
                     builder.draw_image(
                         value.asset,
                         {value.destination.origin + offset, value.destination.size}
                     );
+                } else if constexpr (std::same_as<T, PushClipRectCommand>) {
+                    builder.push_clip_rect({value.rect.origin + offset, value.rect.size});
+                } else {
+                    builder.pop_clip();
                 }
             }, command);
         }
@@ -87,6 +101,18 @@ void dump_layer(const Layer& layer, std::ostringstream& output, std::size_t dept
         dump_layer(*translated->child(), output, depth + 1);
         break;
     }
+    case Layer::Kind::clip_rect: {
+        const auto* clipped = dynamic_cast<const ClipRectLayer*>(&layer);
+        if (clipped == nullptr) {
+            throw std::logic_error("Layer kind does not match ClipRectLayer type");
+        }
+        output << indent << "clip_rect(" << number(clipped->clip_rect().origin.x) << ", "
+            << number(clipped->clip_rect().origin.y) << ", "
+            << number(clipped->clip_rect().size.width) << ", "
+            << number(clipped->clip_rect().size.height) << ")\n";
+        dump_layer(*clipped->child(), output, depth + 1);
+        break;
+    }
     case Layer::Kind::display_list: {
         const auto* display_layer = dynamic_cast<const DisplayListLayer*>(&layer);
         if (display_layer == nullptr) {
@@ -100,6 +126,24 @@ void dump_layer(const Layer& layer, std::ostringstream& output, std::size_t dept
 }
 
 } // namespace
+
+DisplayList::DisplayList(std::vector<DisplayCommand> commands) :
+    commands_(std::move(commands)) {
+    std::size_t clip_depth = 0;
+    for (const DisplayCommand& command : commands_) {
+        if (std::holds_alternative<PushClipRectCommand>(command)) {
+            ++clip_depth;
+        } else if (std::holds_alternative<PopClipCommand>(command)) {
+            if (clip_depth == 0) {
+                throw std::invalid_argument("DisplayList clip stack underflow");
+            }
+            --clip_depth;
+        }
+    }
+    if (clip_depth != 0) {
+        throw std::invalid_argument("DisplayList contains an unclosed clip");
+    }
+}
 
 std::string DisplayList::dump() const {
     std::ostringstream output;
@@ -116,12 +160,19 @@ std::string DisplayList::dump() const {
                     << number(value.rect.size.height) << ", 0x"
                     << std::hex << std::setw(8) << std::setfill('0') << value.color
                     << std::dec << ")\n";
-            } else {
+            } else if constexpr (std::same_as<T, DrawImageCommand>) {
                 output << "image(\"" << value.asset << "\", "
                     << number(value.destination.origin.x) << ", "
                     << number(value.destination.origin.y) << ", "
                     << number(value.destination.size.width) << ", "
                     << number(value.destination.size.height) << ")\n";
+            } else if constexpr (std::same_as<T, PushClipRectCommand>) {
+                output << "push_clip_rect(" << number(value.rect.origin.x) << ", "
+                    << number(value.rect.origin.y) << ", "
+                    << number(value.rect.size.width) << ", "
+                    << number(value.rect.size.height) << ")\n";
+            } else {
+                output << "pop_clip()\n";
             }
         }, command);
     }
@@ -140,6 +191,23 @@ void DisplayListBuilder::draw_image(std::string_view asset, Rect destination) {
     commands_.emplace_back(DrawImageCommand{std::string(asset), destination});
 }
 
+void DisplayListBuilder::push_clip_rect(Rect rect) {
+    static_cast<void>(BoxConstraints{}.constrain(rect.size));
+    if (!std::isfinite(rect.origin.x) || !std::isfinite(rect.origin.y)) {
+        throw std::invalid_argument("Clip rectangle origin must be finite");
+    }
+    commands_.emplace_back(PushClipRectCommand{rect});
+    ++clip_depth_;
+}
+
+void DisplayListBuilder::pop_clip() {
+    if (clip_depth_ == 0) {
+        throw std::logic_error("DisplayList clip stack underflow");
+    }
+    commands_.emplace_back(PopClipCommand{});
+    --clip_depth_;
+}
+
 ContainerLayer::ContainerLayer(std::vector<LayerPtr> children) :
     children_(std::move(children)) {
     if (std::ranges::any_of(children_, [](const LayerPtr& child) { return child == nullptr; })) {
@@ -155,6 +223,18 @@ OffsetLayer::OffsetLayer(Offset offset, LayerPtr child) :
     }
     if (child_ == nullptr) {
         throw std::invalid_argument("OffsetLayer child cannot be null");
+    }
+}
+
+ClipRectLayer::ClipRectLayer(Rect clip_rect, LayerPtr child) :
+    clip_rect_(clip_rect),
+    child_(std::move(child)) {
+    static_cast<void>(BoxConstraints{}.constrain(clip_rect.size));
+    if (!std::isfinite(clip_rect.origin.x) || !std::isfinite(clip_rect.origin.y)) {
+        throw std::invalid_argument("ClipRectLayer origin must be finite");
+    }
+    if (child_ == nullptr) {
+        throw std::invalid_argument("ClipRectLayer child cannot be null");
     }
 }
 
@@ -267,6 +347,7 @@ void RenderObject::set_children(std::span<RenderObject* const> children) {
     }
 
     std::vector<RenderObject*> next{children.begin(), children.end()};
+    validate_child_count(next.size());
     for (std::size_t index = 0; index < next.size(); ++index) {
         RenderObject* child = next[index];
         if (child == nullptr) {
@@ -310,6 +391,12 @@ bool RenderObject::hit_test(HitTestResult& result, Offset position) {
 }
 
 void RenderBox::validate_child_protocol(const RenderObject& child) const {
+    if (accepts_sliver_children_) {
+        if (dynamic_cast<const RenderSliver*>(&child) == nullptr) {
+            throw std::logic_error("A RenderViewport can only adopt RenderSliver children");
+        }
+        return;
+    }
     if (dynamic_cast<const RenderBox*>(&child) == nullptr) {
         throw std::logic_error("A RenderBox can only adopt another RenderBox");
     }
@@ -361,21 +448,172 @@ void RenderBox::layout_child(
     child_box->layout(child_constraints);
 }
 
-void RenderBox::paint_subtree(PaintingContext& context, Offset parent_offset) {
-    const Offset absolute_offset = parent_offset + parent_data_.offset;
-    paint(context, absolute_offset);
-    for (RenderObject* child : children_) {
-        child->paint_subtree(context, absolute_offset);
-    }
-    needs_paint_ = false;
-    ++paint_count_;
-    owner_->dirty_paint_.erase(this);
-}
-
 RenderObject* RenderObject::hit_test(Offset position) {
     HitTestResult result;
     static_cast<void>(hit_test(result, position));
     return result.target();
+}
+
+void RenderSliver::validate_child_protocol(const RenderObject& child) const {
+    if (!accepts_box_children_ || dynamic_cast<const RenderBox*>(&child) == nullptr) {
+        throw std::logic_error("This RenderSliver can only adopt RenderBox children");
+    }
+}
+
+void RenderSliver::layout(SliverConstraints constraints) {
+    if (!needs_layout_ && constraints_ == constraints) {
+        return;
+    }
+    const std::optional<SliverConstraints> previous_constraints = constraints_;
+    const SliverGeometry previous_geometry = geometry_;
+    const bool constraints_changed = constraints_ != constraints;
+    constraints_ = constraints;
+    needs_layout_ = true;
+    try {
+        perform_layout();
+        if (geometry_.paint_extent() > constraints.remaining_paint_extent()) {
+            throw std::logic_error("Sliver paint extent exceeds its remaining paint extent");
+        }
+    } catch (...) {
+        constraints_ = previous_constraints;
+        geometry_ = previous_geometry;
+        owner_->schedule_layout(*this);
+        throw;
+    }
+    if (constraints_changed || geometry_ != previous_geometry) {
+        mark_needs_paint();
+    }
+    needs_layout_ = false;
+    ++layout_count_;
+    owner_->dirty_layout_.erase(this);
+}
+
+void RenderSliver::layout_box_child(
+    RenderObject& child,
+    BoxConstraints child_constraints,
+    Offset child_offset
+) {
+    auto* child_box = dynamic_cast<RenderBox*>(&child);
+    if (child_box == nullptr) {
+        throw std::logic_error("RenderSliver box layout requires a RenderBox child");
+    }
+    const Offset previous_offset = child_box->parent_data_.offset;
+    try {
+        child_box->layout(child_constraints);
+        child_box->parent_data_.offset = child_offset;
+    } catch (...) {
+        child_box->parent_data_.offset = previous_offset;
+        throw;
+    }
+    if (previous_offset != child_offset) {
+        if (child_box->is_repaint_boundary()) {
+            mark_needs_paint();
+        } else {
+            child_box->mark_needs_paint();
+        }
+    }
+}
+
+bool RenderSliver::hit_test_protocol(HitTestResult& result, Offset position) {
+    if (!constraints_.has_value()
+        || position.x < 0.0 || position.x >= constraints().cross_axis_extent()
+        || position.y < 0.0 || position.y >= geometry_.hit_test_extent()) {
+        return false;
+    }
+    for (RenderObject* child : children() | std::views::reverse) {
+        const auto& child_box = static_cast<const RenderBox&>(*child);
+        if (child->hit_test(result, position - child_box.offset())) {
+            result.add({this, position});
+            return true;
+        }
+    }
+    return false;
+}
+
+RenderViewport::RenderViewport(RenderOwner& owner, double scroll_offset) :
+    RenderBox(owner, true), scroll_offset_(scroll_offset) {
+    if (!std::isfinite(scroll_offset) || scroll_offset < 0.0) {
+        throw std::invalid_argument("Viewport scroll offset must be finite and non-negative");
+    }
+}
+
+void RenderViewport::set_scroll_offset(double scroll_offset) {
+    if (!std::isfinite(scroll_offset) || scroll_offset < 0.0) {
+        throw std::invalid_argument("Viewport scroll offset must be finite and non-negative");
+    }
+    if (scroll_offset_ == scroll_offset) {
+        return;
+    }
+    scroll_offset_ = scroll_offset;
+    mark_needs_layout();
+}
+
+void RenderViewport::perform_layout() {
+    const Size viewport = constraints().biggest();
+    if (!std::isfinite(viewport.width) || !std::isfinite(viewport.height)) {
+        throw std::logic_error("RenderViewport requires finite viewport constraints");
+    }
+    set_size(viewport);
+
+    double preceding = 0.0;
+    for (RenderObject* child : children()) {
+        auto& sliver = static_cast<RenderSliver&>(*child);
+        const double paint_origin = std::max(0.0, preceding - scroll_offset_);
+        const double remaining = std::max(0.0, viewport.height - paint_origin);
+        const double local_scroll = std::max(0.0, scroll_offset_ - preceding);
+        const Offset previous_offset = sliver.parent_data_.paint_offset;
+        sliver.layout({local_scroll, preceding, remaining, viewport.width, viewport.height});
+        sliver.parent_data_.paint_offset = {0.0, paint_origin};
+        if (previous_offset != sliver.parent_data_.paint_offset) {
+            sliver.mark_needs_paint();
+        }
+        preceding += sliver.geometry().scroll_extent();
+        if (!std::isfinite(preceding)) {
+            throw std::overflow_error("Viewport scroll extent overflowed");
+        }
+    }
+    max_scroll_extent_ = std::max(0.0, preceding - viewport.height);
+}
+
+bool RenderViewport::hit_test_protocol(HitTestResult& result, Offset position) {
+    if (!size().contains(position)) {
+        return false;
+    }
+    for (RenderObject* child : children() | std::views::reverse) {
+        const auto& sliver = static_cast<const RenderSliver&>(*child);
+        if (child->hit_test(result, position - sliver.parent_data().paint_offset)) {
+            result.add({this, position});
+            return true;
+        }
+    }
+    return false;
+}
+
+void RenderSliverToBoxAdapter::perform_layout() {
+    if (children().empty()) {
+        set_geometry({});
+        return;
+    }
+    auto& child = static_cast<RenderBox&>(*children().front());
+    layout_box_child(child, constraints().as_box_constraints(), {0.0, -constraints().scroll_offset()});
+    const double scroll_extent = child.size().height;
+    const double visible = std::min(
+        std::max(0.0, scroll_extent - constraints().scroll_offset()),
+        constraints().remaining_paint_extent()
+    );
+    set_geometry({
+        scroll_extent,
+        visible,
+        scroll_extent,
+        visible,
+        constraints().scroll_offset() > 0.0 || visible < scroll_extent
+    });
+}
+
+void RenderSliverToBoxAdapter::validate_child_count(std::size_t count) const {
+    if (count > 1) {
+        throw std::logic_error("RenderSliverToBoxAdapter accepts at most one RenderBox child");
+    }
 }
 
 bool RenderBox::hit_test_protocol(HitTestResult& result, Offset position) {
@@ -701,22 +939,34 @@ void RenderOwner::record_boundary(RenderBox& boundary) {
         }
     } recorder;
 
-    const auto record = [&](auto&& self, RenderBox& object, Offset offset) -> void {
+    const auto record = [&](auto&& self, RenderObject& object, Offset offset) -> void {
+        const std::optional<Rect> clip = object.paint_clip(offset);
+        if (clip.has_value()) {
+            recorder.flush();
+            recorder.chunks.emplace_back(RenderBox::BoundaryClipBegin{*clip});
+        }
         PaintingContext context{recorder.builder};
         object.paint(context, offset);
         recorder.painted.push_back(&object);
-        for (RenderObject* child : object.children_) {
-            auto& child_box = static_cast<RenderBox&>(*child);
-            if (child_box.is_repaint_boundary()) {
-                ensure_boundary(child_box);
-                recorder.flush();
-                recorder.chunks.emplace_back(RenderBox::BoundaryChild{
-                    child_box.id(),
-                    offset + child_box.offset()
-                });
-            } else {
-                self(self, child_box, offset + child_box.offset());
+        if (object.should_paint_children()) {
+            for (RenderObject* child : object.children_) {
+                const Offset child_offset = offset + child->paint_offset();
+                if (auto* child_box = dynamic_cast<RenderBox*>(child);
+                    child_box != nullptr && child_box->is_repaint_boundary()) {
+                    ensure_boundary(*child_box);
+                    recorder.flush();
+                    recorder.chunks.emplace_back(RenderBox::BoundaryChild{
+                        child_box->id(),
+                        child_offset
+                    });
+                } else {
+                    self(self, *child, child_offset);
+                }
             }
+        }
+        if (clip.has_value()) {
+            recorder.flush();
+            recorder.chunks.emplace_back(RenderBox::BoundaryClipEnd{});
         }
     };
 
@@ -748,11 +998,31 @@ void RenderOwner::record_boundary(RenderBox& boundary) {
 }
 
 void RenderOwner::compose_boundary(RenderBox& boundary) {
-    std::vector<LayerPtr> layers;
-    layers.reserve(boundary.boundary_chunks_.size());
+    struct LayerFrame {
+        std::optional<Rect> clip;
+        std::vector<LayerPtr> layers;
+    };
+    std::vector<LayerFrame> frames(1);
+    frames.front().layers.reserve(boundary.boundary_chunks_.size());
     for (const RenderBox::BoundaryChunk& chunk : boundary.boundary_chunks_) {
         if (const auto* display = std::get_if<DisplayList>(&chunk)) {
-            layers.push_back(std::make_shared<DisplayListLayer>(*display));
+            frames.back().layers.push_back(std::make_shared<DisplayListLayer>(*display));
+            continue;
+        }
+        if (const auto* clip = std::get_if<RenderBox::BoundaryClipBegin>(&chunk)) {
+            frames.push_back({clip->rect, {}});
+            continue;
+        }
+        if (std::holds_alternative<RenderBox::BoundaryClipEnd>(chunk)) {
+            if (frames.size() == 1 || !frames.back().clip.has_value()) {
+                throw std::logic_error("Retained boundary clip chunks are unbalanced");
+            }
+            LayerFrame clipped = std::move(frames.back());
+            frames.pop_back();
+            auto contents = std::make_shared<ContainerLayer>(std::move(clipped.layers));
+            frames.back().layers.push_back(
+                std::make_shared<ClipRectLayer>(*clipped.clip, std::move(contents))
+            );
             continue;
         }
         const auto child_id = std::get<RenderBox::BoundaryChild>(chunk).id;
@@ -761,12 +1031,15 @@ void RenderOwner::compose_boundary(RenderBox& boundary) {
             throw std::logic_error("Retained boundary slot no longer resolves");
         }
         ensure_boundary(*child);
-        layers.push_back(std::make_shared<OffsetLayer>(
+        frames.back().layers.push_back(std::make_shared<OffsetLayer>(
             std::get<RenderBox::BoundaryChild>(chunk).offset,
             child->retained_layer_
         ));
     }
-    boundary.retained_layer_ = std::make_shared<ContainerLayer>(std::move(layers));
+    if (frames.size() != 1) {
+        throw std::logic_error("Retained boundary clip chunks are unbalanced");
+    }
+    boundary.retained_layer_ = std::make_shared<ContainerLayer>(std::move(frames.front().layers));
     boundary.needs_compositing_ = false;
     dirty_compositing_.erase(&boundary);
 }

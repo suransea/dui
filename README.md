@@ -5,9 +5,9 @@ Widget/Element/RenderObject architecture. It combines short-lived, statically
 typed view descriptions with a persistent runtime element tree.
 
 The current implementation is intentionally headless. It validates build,
-identity, reconciliation, state, dependency tracking, box layout, painting,
-hit testing, pointer activation, and the NativeView/Renderer boundary before
-introducing a production graphics backend.
+identity, reconciliation, state, dependency tracking, box and Sliver layout,
+painting, hit testing, pointer activation, and the NativeView/Renderer boundary
+before introducing a production graphics backend.
 
 Frames are represented by immutable retained `LayerTree` snapshots. Declarative
 `RepaintBoundary` Views isolate paint work, while the compatibility renderer
@@ -16,6 +16,11 @@ owned raster worker submits immutable snapshots asynchronously and provides
 quiescent stop/join semantics. Raster submission captures surface metrics and
 returns a shared completion ticket for presentation, retry, cancellation, or
 terminal failure.
+
+A vertical `Viewport` is the explicit box-to-Sliver boundary. It accepts
+`SliverToBoxAdapter` children, computes scroll and paint geometry, clips retained
+output, and preserves hit-test coordinates while scrolling. Lazy list child
+creation remains a later virtualization slice.
 
 ```cpp
 struct Counter {
@@ -35,9 +40,9 @@ struct Counter {
 See [RFC 0001](docs/rfcs/0001-cpp-declarative-ui-architecture.md) for the
 architecture and implementation roadmap.
 
-Implemented layout Views include `VStack`, `HStack`, `Stack`, `Padding`, and
-`ColoredBox`; primitives include `Text` and `Image`. A deterministic DisplayList
-serves as the test renderer.
+Implemented layout Views include `VStack`, `HStack`, `Stack`, `Padding`,
+`ColoredBox`, `Viewport`, and `SliverToBoxAdapter`; primitives include `Text`
+and `Image`. A deterministic DisplayList serves as the test renderer.
 
 The interaction foundation includes typed Environment values, Signals, named
 RAII resources, cancellation, GestureArena, focus/key routing, IME contracts,

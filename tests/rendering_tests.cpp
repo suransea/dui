@@ -5,6 +5,7 @@
 #include <exception>
 #include <iostream>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -205,6 +206,33 @@ concept ExposesBoxGeometry = requires(const T& value) {
 
 static_assert(!ExposesBoxGeometry<NonBoxRenderObject>);
 static_assert(ExposesBoxGeometry<dui::RenderBox>);
+
+template<class T>
+concept ExposesSliverGeometry = requires(const T& value) {
+    value.geometry();
+    value.parent_data();
+};
+
+static_assert(!ExposesSliverGeometry<NonBoxRenderObject>);
+static_assert(!ExposesSliverGeometry<dui::RenderBox>);
+static_assert(ExposesSliverGeometry<dui::RenderSliver>);
+
+struct SliverComponent {
+    auto build(dui::BuildContext&) const {
+        return dui::Fragment{dui::SliverToBoxAdapter{dui::Text{"component"}}};
+    }
+};
+
+struct BoxComponent {
+    auto build(dui::BuildContext&) const {
+        return dui::Fragment{dui::Text{"component"}};
+    }
+};
+
+static_assert(dui::detail::has_sliver_protocol<SliverComponent>());
+static_assert(!dui::detail::has_box_protocol<SliverComponent>());
+static_assert(dui::detail::has_box_protocol<BoxComponent>());
+static_assert(!dui::detail::has_sliver_protocol<BoxComponent>());
 
 void render_tree_rejects_invalid_children_without_mutation() {
     dui::RenderOwner owner;
@@ -517,6 +545,216 @@ void failed_layout_does_not_poison_constraints_cache() {
     require(recovered.flatten().dump() == stable.flatten().dump(), "valid frame did not recover after layout failure");
 }
 
+void sliver_values_validate_protocol_invariants() {
+    const dui::SliverConstraints constraints{4.0, 16.0, 20.0, 100.0, 20.0};
+    require(
+        constraints.as_box_constraints() == dui::BoxConstraints{100.0, 100.0, 0.0, dui::infinity},
+        "SliverConstraints produced incorrect box constraints"
+    );
+    const dui::SliverGeometry geometry{32.0, 20.0, 32.0, 20.0, true};
+    require(geometry.scroll_extent() == 32.0 && geometry.has_visual_overflow(), "SliverGeometry lost values");
+
+    bool constraints_rejected = false;
+    try {
+        static_cast<void>(dui::SliverConstraints{
+            std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0, 0.0, 0.0
+        });
+    } catch (const std::invalid_argument&) {
+        constraints_rejected = true;
+    }
+    require(constraints_rejected, "NaN SliverConstraints were accepted");
+
+    bool geometry_rejected = false;
+    try {
+        static_cast<void>(dui::SliverGeometry{10.0, 8.0, 7.0, 8.0});
+    } catch (const std::invalid_argument&) {
+        geometry_rejected = true;
+    }
+    require(geometry_rejected, "non-normalized SliverGeometry was accepted");
+}
+
+void sliver_pre_layout_hit_test_and_malformed_clips_are_rejected_safely() {
+    dui::RenderOwner owner;
+    dui::RenderSliverToBoxAdapter sliver{owner};
+    dui::HitTestResult result;
+    require(!sliver.hit_test(result, {0.0, 0.0}), "unlaid-out Sliver reported a hit");
+
+    dui::DisplayListBuilder underflow;
+    bool pop_rejected = false;
+    try {
+        underflow.pop_clip();
+    } catch (const std::logic_error&) {
+        pop_rejected = true;
+    }
+    require(pop_rejected, "DisplayListBuilder accepted clip-stack underflow");
+
+    dui::DisplayListBuilder unclosed;
+    unclosed.push_clip_rect({{}, {10.0, 10.0}});
+    bool build_rejected = false;
+    try {
+        static_cast<void>(std::move(unclosed).build());
+    } catch (const std::logic_error&) {
+        build_rejected = true;
+    }
+    require(build_rejected, "DisplayListBuilder accepted an unclosed clip");
+
+    bool direct_rejected = false;
+    try {
+        static_cast<void>(dui::DisplayList{
+            std::vector<dui::DisplayCommand>{dui::PopClipCommand{}}
+        });
+    } catch (const std::invalid_argument&) {
+        direct_rejected = true;
+    }
+    require(direct_rejected, "DisplayList accepted a malformed public command stream");
+}
+
+void render_protocols_reject_wrong_children_transactionally() {
+    dui::RenderOwner owner;
+    dui::RenderVStack box{owner};
+    dui::RenderViewport viewport{owner};
+    dui::RenderSliverToBoxAdapter sliver{owner};
+    dui::RenderSliverToBoxAdapter other_sliver{owner};
+    dui::RenderText first{owner, "first"};
+    dui::RenderText second{owner, "second"};
+
+    std::array<dui::RenderObject*, 1> original{&first};
+    sliver.set_children(original);
+
+    const auto rejected_without_mutation = [&](dui::RenderObject& parent,
+                                                std::span<dui::RenderObject* const> proposed) {
+        bool rejected = false;
+        try {
+            parent.set_children(proposed);
+        } catch (const std::logic_error&) {
+            rejected = true;
+        }
+        require(rejected, "incompatible render protocol was accepted");
+    };
+
+    std::array<dui::RenderObject*, 1> sliver_child{&sliver};
+    rejected_without_mutation(box, sliver_child);
+    std::array<dui::RenderObject*, 1> box_child{&second};
+    rejected_without_mutation(viewport, box_child);
+    std::array<dui::RenderObject*, 1> wrong_sliver_child{&other_sliver};
+    rejected_without_mutation(sliver, wrong_sliver_child);
+    std::array<dui::RenderObject*, 2> too_many{&first, &second};
+    rejected_without_mutation(sliver, too_many);
+    require(sliver.children().size() == 1 && sliver.children().front() == &first,
+            "failed Sliver child update mutated the original tree");
+    require(first.parent() == &sliver && second.parent() == nullptr,
+            "failed Sliver child update changed parent links");
+}
+
+void viewport_lays_out_clips_paints_and_hits_slivers() {
+    dui::BuildOwner owner;
+    owner.render(dui::Viewport{
+        8.0,
+        dui::SliverToBoxAdapter{dui::Text{"A"}},
+        dui::SliverToBoxAdapter{dui::Text{"B"}}
+    });
+    const auto first = owner.layer_frame(dui::BoxConstraints::tight({100.0, 20.0}));
+    require(
+        first.flatten().dump() ==
+            "push_clip_rect(0.0, 0.0, 100.0, 20.0)\n"
+            "text(\"A\", 0.0, -8.0)\n"
+            "text(\"B\", 0.0, 8.0)\n"
+            "pop_clip()\n",
+        "Viewport produced incorrect clipped paint output"
+    );
+
+    auto* viewport = dynamic_cast<dui::RenderViewport*>(owner.root()->render_object());
+    require(viewport != nullptr, "Viewport did not create RenderViewport");
+    require(viewport->size() == dui::Size{100.0, 20.0}, "Viewport size is incorrect");
+    require(viewport->max_scroll_extent() == 12.0, "Viewport max scroll extent is incorrect");
+    auto* first_sliver = dynamic_cast<dui::RenderSliver*>(viewport->children()[0]);
+    auto* second_sliver = dynamic_cast<dui::RenderSliver*>(viewport->children()[1]);
+    require(first_sliver != nullptr && second_sliver != nullptr, "Viewport children are not Slivers");
+    require(first_sliver->geometry().paint_extent() == 8.0, "leading Sliver paint extent is incorrect");
+    require(second_sliver->parent_data().paint_offset == dui::Offset{0.0, 8.0},
+            "second Sliver paint offset is incorrect");
+    require(owner.hit_test({1.0, 1.0}) == first_sliver->children().front(),
+            "partially visible leading Sliver did not hit");
+    require(owner.hit_test({1.0, 9.0}) == second_sliver->children().front(),
+            "second visible Sliver did not hit");
+    require(owner.hit_test({1.0, 20.0}) == nullptr, "Viewport trailing edge was hit");
+}
+
+void view_protocols_propagate_through_components_and_fragments() {
+    dui::BuildOwner owner;
+    owner.render(dui::Viewport{0.0, SliverComponent{}});
+    const auto frame = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+    require(frame.dump().contains("text(\"component\", 0.0, 0.0)"),
+            "Sliver component protocol did not propagate through transparent Elements");
+
+    owner.render(dui::Viewport{
+        0.0,
+        dui::SliverToBoxAdapter{BoxComponent{}}
+    });
+    const auto box_component = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+    require(box_component.dump().contains("text(\"component\", 0.0, 0.0)"),
+            "box component protocol did not propagate into Sliver adapter");
+}
+
+void viewport_scroll_update_preserves_identity_and_culls_offscreen_content() {
+    dui::BuildOwner owner;
+    const auto make_view = [](double offset) {
+        return dui::Viewport{
+            offset,
+            dui::SliverToBoxAdapter{dui::Text{"A"}},
+            dui::SliverToBoxAdapter{dui::Text{"B"}}
+        };
+    };
+    owner.render(make_view(0.0));
+    const auto initial = owner.layer_frame(dui::BoxConstraints::tight({100.0, 16.0}));
+    auto* viewport = owner.root()->render_object();
+    auto* first_sliver = viewport->children()[0];
+    auto* second_sliver = viewport->children()[1];
+    const auto viewport_layouts = viewport->layout_count();
+
+    owner.render(make_view(16.0));
+    const auto scrolled = owner.layer_frame(dui::BoxConstraints::tight({100.0, 16.0}));
+    require(owner.root()->render_object() == viewport, "scroll update replaced RenderViewport");
+    require(viewport->children()[0] == first_sliver && viewport->children()[1] == second_sliver,
+            "scroll update replaced RenderSlivers");
+    require(viewport->layout_count() == viewport_layouts + 1, "scroll update did not relayout viewport once");
+    require(!scrolled.flatten().dump().contains("text(\"A\""), "fully offscreen Sliver was painted");
+    require(scrolled.flatten().dump().contains("text(\"B\", 0.0, 0.0)"),
+            "visible Sliver used the wrong scroll translation");
+    require(initial.flatten().dump().contains("text(\"A\", 0.0, 0.0)"),
+            "scroll update mutated an older LayerTree snapshot");
+
+    const auto clean_layouts = viewport->layout_count();
+    owner.render(make_view(16.0));
+    static_cast<void>(owner.layer_frame(dui::BoxConstraints::tight({100.0, 16.0})));
+    require(viewport->layout_count() == clean_layouts, "equivalent Viewport update repeated layout");
+}
+
+void viewport_scroll_reuses_repaint_boundary_layer() {
+    dui::BuildOwner owner;
+    const auto make_view = [](double offset) {
+        return dui::Viewport{
+            offset,
+            dui::SliverToBoxAdapter{dui::repaint_boundary(dui::Text{"retained"})}
+        };
+    };
+    owner.render(make_view(0.0));
+    static_cast<void>(owner.layer_frame(dui::BoxConstraints::tight({100.0, 8.0})));
+    auto* viewport = owner.root()->render_object();
+    auto* sliver = viewport->children().front();
+    auto* boundary = dynamic_cast<dui::RenderRepaintBoundary*>(sliver->children().front());
+    require(boundary != nullptr, "Sliver repaint boundary was not created");
+    const auto retained = boundary->retained_layer();
+    const auto paints = boundary->paint_count();
+
+    owner.render(make_view(4.0));
+    const auto moved = owner.layer_frame(dui::BoxConstraints::tight({100.0, 8.0}));
+    require(boundary->retained_layer() == retained, "scrolling repainted boundary-local content");
+    require(boundary->paint_count() == paints, "scrolling increased repaint-boundary paint count");
+    require(moved.flatten().dump().contains("text(\"retained\", 0.0, -4.0)"),
+            "scrolling did not recompose the retained boundary at its new offset");
+}
+
 void nested_boundary_recomposes_without_repainting_outer_content() {
     dui::BuildOwner owner;
     const auto make_view = [](std::uint32_t color) {
@@ -741,6 +979,13 @@ int main() {
         moving_boundary_reuses_local_layer();
         boundary_records_accumulated_non_boundary_offset();
         failed_layout_does_not_poison_constraints_cache();
+        sliver_values_validate_protocol_invariants();
+        sliver_pre_layout_hit_test_and_malformed_clips_are_rejected_safely();
+        render_protocols_reject_wrong_children_transactionally();
+        viewport_lays_out_clips_paints_and_hits_slivers();
+        view_protocols_propagate_through_components_and_fragments();
+        viewport_scroll_update_preserves_identity_and_culls_offscreen_content();
+        viewport_scroll_reuses_repaint_boundary_layer();
         nested_boundary_recomposes_without_repainting_outer_content();
         stack_hit_test_uses_reverse_paint_order_and_records_path();
         color_update_repaints_without_layout();

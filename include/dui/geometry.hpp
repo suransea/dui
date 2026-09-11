@@ -136,4 +136,108 @@ private:
     double max_height_;
 };
 
+class SliverConstraints {
+public:
+    constexpr SliverConstraints(
+        double scroll_offset,
+        double preceding_scroll_extent,
+        double remaining_paint_extent,
+        double cross_axis_extent,
+        double viewport_main_axis_extent
+    ) :
+        scroll_offset_(scroll_offset),
+        preceding_scroll_extent_(preceding_scroll_extent),
+        remaining_paint_extent_(remaining_paint_extent),
+        cross_axis_extent_(cross_axis_extent),
+        viewport_main_axis_extent_(viewport_main_axis_extent) {
+        if (!valid()) {
+            throw std::invalid_argument("SliverConstraints values must be finite and non-negative");
+        }
+    }
+
+    [[nodiscard]] constexpr double scroll_offset() const { return scroll_offset_; }
+    [[nodiscard]] constexpr double preceding_scroll_extent() const {
+        return preceding_scroll_extent_;
+    }
+    [[nodiscard]] constexpr double remaining_paint_extent() const {
+        return remaining_paint_extent_;
+    }
+    [[nodiscard]] constexpr double cross_axis_extent() const { return cross_axis_extent_; }
+    [[nodiscard]] constexpr double viewport_main_axis_extent() const {
+        return viewport_main_axis_extent_;
+    }
+    [[nodiscard]] constexpr BoxConstraints as_box_constraints() const {
+        return {cross_axis_extent_, cross_axis_extent_, 0.0, infinity};
+    }
+
+    friend constexpr bool operator==(const SliverConstraints&, const SliverConstraints&) = default;
+
+private:
+    [[nodiscard]] constexpr bool valid() const {
+        return std::isfinite(scroll_offset_)
+            && std::isfinite(preceding_scroll_extent_)
+            && std::isfinite(remaining_paint_extent_)
+            && std::isfinite(cross_axis_extent_)
+            && std::isfinite(viewport_main_axis_extent_)
+            && scroll_offset_ >= 0.0
+            && preceding_scroll_extent_ >= 0.0
+            && remaining_paint_extent_ >= 0.0
+            && cross_axis_extent_ >= 0.0
+            && viewport_main_axis_extent_ >= 0.0;
+    }
+
+    double scroll_offset_;
+    double preceding_scroll_extent_;
+    double remaining_paint_extent_;
+    double cross_axis_extent_;
+    double viewport_main_axis_extent_;
+};
+
+class SliverGeometry {
+public:
+    constexpr SliverGeometry(
+        double scroll_extent = 0.0,
+        double paint_extent = 0.0,
+        double max_paint_extent = 0.0,
+        double hit_test_extent = 0.0,
+        bool has_visual_overflow = false
+    ) :
+        scroll_extent_(scroll_extent),
+        paint_extent_(paint_extent),
+        max_paint_extent_(max_paint_extent),
+        hit_test_extent_(hit_test_extent),
+        has_visual_overflow_(has_visual_overflow) {
+        if (!valid()) {
+            throw std::invalid_argument("SliverGeometry extents must be finite, non-negative, and normalized");
+        }
+    }
+
+    [[nodiscard]] constexpr double scroll_extent() const { return scroll_extent_; }
+    [[nodiscard]] constexpr double paint_extent() const { return paint_extent_; }
+    [[nodiscard]] constexpr double max_paint_extent() const { return max_paint_extent_; }
+    [[nodiscard]] constexpr double hit_test_extent() const { return hit_test_extent_; }
+    [[nodiscard]] constexpr bool has_visual_overflow() const { return has_visual_overflow_; }
+
+    friend constexpr bool operator==(const SliverGeometry&, const SliverGeometry&) = default;
+
+private:
+    [[nodiscard]] constexpr bool valid() const {
+        return std::isfinite(scroll_extent_)
+            && std::isfinite(paint_extent_)
+            && std::isfinite(max_paint_extent_)
+            && std::isfinite(hit_test_extent_)
+            && scroll_extent_ >= 0.0
+            && paint_extent_ >= 0.0
+            && max_paint_extent_ >= paint_extent_
+            && hit_test_extent_ >= 0.0
+            && hit_test_extent_ <= paint_extent_;
+    }
+
+    double scroll_extent_;
+    double paint_extent_;
+    double max_paint_extent_;
+    double hit_test_extent_;
+    bool has_visual_overflow_;
+};
+
 } // namespace dui

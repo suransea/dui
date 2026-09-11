@@ -39,12 +39,27 @@ struct DrawImageCommand {
     friend bool operator==(const DrawImageCommand&, const DrawImageCommand&) = default;
 };
 
-using DisplayCommand = std::variant<DrawTextCommand, DrawRectCommand, DrawImageCommand>;
+struct PushClipRectCommand {
+    Rect rect;
+
+    friend bool operator==(const PushClipRectCommand&, const PushClipRectCommand&) = default;
+};
+
+struct PopClipCommand {
+    friend bool operator==(PopClipCommand, PopClipCommand) = default;
+};
+
+using DisplayCommand = std::variant<
+    DrawTextCommand,
+    DrawRectCommand,
+    DrawImageCommand,
+    PushClipRectCommand,
+    PopClipCommand
+>;
 
 class DisplayList {
 public:
-    explicit DisplayList(std::vector<DisplayCommand> commands = {}) :
-        commands_(std::move(commands)) {}
+    explicit DisplayList(std::vector<DisplayCommand> commands = {});
 
     [[nodiscard]] const std::vector<DisplayCommand>& commands() const { return commands_; }
     [[nodiscard]] std::string dump() const;
@@ -58,14 +73,20 @@ public:
     void draw_text(std::string_view text, Offset offset);
     void draw_rect(Rect rect, std::uint32_t color);
     void draw_image(std::string_view asset, Rect destination);
+    void push_clip_rect(Rect rect);
+    void pop_clip();
 
     [[nodiscard]] DisplayList build() && {
+        if (clip_depth_ != 0) {
+            throw std::logic_error("DisplayList contains an unclosed clip");
+        }
         return DisplayList{std::move(commands_)};
     }
     [[nodiscard]] bool empty() const { return commands_.empty(); }
 
 private:
     std::vector<DisplayCommand> commands_;
+    std::size_t clip_depth_{};
 };
 
 class PaintingContext {
@@ -93,6 +114,7 @@ public:
     enum class Kind {
         container,
         offset,
+        clip_rect,
         display_list
     };
 
@@ -126,6 +148,19 @@ private:
     LayerPtr child_;
 };
 
+class ClipRectLayer final : public Layer {
+public:
+    ClipRectLayer(Rect clip_rect, LayerPtr child);
+
+    [[nodiscard]] Kind kind() const override { return Kind::clip_rect; }
+    [[nodiscard]] Rect clip_rect() const { return clip_rect_; }
+    [[nodiscard]] const LayerPtr& child() const { return child_; }
+
+private:
+    Rect clip_rect_;
+    LayerPtr child_;
+};
+
 class DisplayListLayer final : public Layer {
 public:
     explicit DisplayListLayer(DisplayList display_list) :
@@ -156,6 +191,7 @@ private:
 class RenderOwner;
 class RenderObject;
 class RenderBox;
+class RenderSliver;
 
 struct HitTestEntry {
     RenderObject* target{};
@@ -176,6 +212,10 @@ private:
 
 struct BoxParentData {
     Offset offset{};
+};
+
+struct SliverParentData {
+    Offset paint_offset{};
 };
 
 class RenderObject {
@@ -211,14 +251,19 @@ protected:
     [[nodiscard]] virtual bool has_activation_handler() const { return false; }
     [[nodiscard]] virtual bool handle_activate() { return false; }
     [[nodiscard]] virtual bool has_repaint_boundary() const { return false; }
+    virtual void paint(PaintingContext&, Offset) {}
 
 private:
     friend class RenderOwner;
     friend class RenderBox;
+    friend class RenderSliver;
 
     virtual void validate_child_protocol(const RenderObject&) const;
+    virtual void validate_child_count(std::size_t) const {}
     [[nodiscard]] virtual bool hit_test_protocol(HitTestResult&, Offset) { return false; }
-    virtual void paint_subtree(PaintingContext&, Offset) {}
+    [[nodiscard]] virtual Offset paint_offset() const { return {}; }
+    [[nodiscard]] virtual std::optional<Rect> paint_clip(Offset) const { return std::nullopt; }
+    [[nodiscard]] virtual bool should_paint_children() const { return true; }
     void detach_from_owner();
 
     RenderOwner* owner_;
@@ -241,27 +286,31 @@ public:
     [[nodiscard]] const BoxParentData& parent_data() const { return parent_data_; }
 
 protected:
+    RenderBox(RenderOwner& owner, bool accepts_sliver_children) :
+        RenderObject(owner), accepts_sliver_children_(accepts_sliver_children) {}
     [[nodiscard]] const BoxConstraints& constraints() const { return *constraints_; }
     void set_size(Size size) { size_ = size; }
     void layout_child(RenderObject& child, BoxConstraints constraints, Offset offset);
     [[nodiscard]] const LayerPtr& boundary_layer() const { return retained_layer_; }
 
     virtual void perform_layout() = 0;
-    virtual void paint(PaintingContext&, Offset) {}
     [[nodiscard]] virtual bool hit_test_self(Offset) const { return false; }
 
 private:
     friend class RenderOwner;
+    friend class RenderSliver;
 
     struct BoundaryChild {
         RenderObject::Id id{};
         Offset offset{};
     };
-    using BoundaryChunk = std::variant<DisplayList, BoundaryChild>;
+    struct BoundaryClipBegin { Rect rect; };
+    struct BoundaryClipEnd {};
+    using BoundaryChunk = std::variant<DisplayList, BoundaryChild, BoundaryClipBegin, BoundaryClipEnd>;
 
     void validate_child_protocol(const RenderObject& child) const final;
     [[nodiscard]] bool hit_test_protocol(HitTestResult& result, Offset position) override;
-    void paint_subtree(PaintingContext& context, Offset parent_offset) override;
+    [[nodiscard]] Offset paint_offset() const override { return parent_data_.offset; }
     void layout(BoxConstraints constraints);
 
     std::optional<BoxConstraints> constraints_;
@@ -269,6 +318,70 @@ private:
     BoxParentData parent_data_;
     std::vector<BoundaryChunk> boundary_chunks_;
     LayerPtr retained_layer_;
+    bool accepts_sliver_children_{};
+};
+
+class RenderSliver : public RenderObject {
+public:
+    explicit RenderSliver(RenderOwner& owner, bool accepts_box_children = false) :
+        RenderObject(owner), accepts_box_children_(accepts_box_children) {}
+
+    [[nodiscard]] const SliverGeometry& geometry() const { return geometry_; }
+    [[nodiscard]] const SliverParentData& parent_data() const { return parent_data_; }
+
+protected:
+    [[nodiscard]] const SliverConstraints& constraints() const { return *constraints_; }
+    void set_geometry(SliverGeometry geometry) { geometry_ = geometry; }
+    void layout_box_child(RenderObject& child, BoxConstraints constraints, Offset offset);
+    virtual void perform_layout() = 0;
+
+private:
+    friend class RenderViewport;
+
+    void validate_child_protocol(const RenderObject& child) const final;
+    [[nodiscard]] bool hit_test_protocol(HitTestResult& result, Offset position) override;
+    [[nodiscard]] Offset paint_offset() const override { return parent_data_.paint_offset; }
+    [[nodiscard]] bool should_paint_children() const override {
+        return geometry_.paint_extent() > 0.0;
+    }
+    void layout(SliverConstraints constraints);
+
+    std::optional<SliverConstraints> constraints_;
+    SliverGeometry geometry_;
+    SliverParentData parent_data_;
+    bool accepts_box_children_{};
+};
+
+class RenderViewport final : public RenderBox {
+public:
+    explicit RenderViewport(RenderOwner& owner, double scroll_offset = 0.0);
+
+    void set_scroll_offset(double scroll_offset);
+    [[nodiscard]] double scroll_offset() const { return scroll_offset_; }
+    [[nodiscard]] double max_scroll_extent() const { return max_scroll_extent_; }
+
+protected:
+    void perform_layout() override;
+
+private:
+    [[nodiscard]] bool hit_test_protocol(HitTestResult& result, Offset position) override;
+    [[nodiscard]] std::optional<Rect> paint_clip(Offset offset) const override {
+        return Rect{offset, size()};
+    }
+
+    double scroll_offset_{};
+    double max_scroll_extent_{};
+};
+
+class RenderSliverToBoxAdapter final : public RenderSliver {
+public:
+    explicit RenderSliverToBoxAdapter(RenderOwner& owner) : RenderSliver(owner, true) {}
+
+protected:
+    void perform_layout() override;
+
+private:
+    void validate_child_count(std::size_t count) const override;
 };
 
 class RenderText final : public RenderBox {
@@ -442,6 +555,7 @@ public:
 private:
     friend class RenderObject;
     friend class RenderBox;
+    friend class RenderSliver;
 
     void schedule_layout(RenderObject& object);
     void schedule_paint(RenderObject& object);

@@ -90,8 +90,9 @@ have not yet been executed against a real Windows HWND/IME in this environment.
 
 ## M3: Production Rendering
 
-Status: protocol-separation and retained-rendering slices implemented and
-verified; production raster backend remains in progress.
+Status: protocol-separation, retained-rendering, raster-submission, surface,
+and initial Sliver/Viewport slices implemented and verified; production GPU
+consumption and lazy scrolling remain in progress.
 
 The first M3 slice moves `BoxConstraints`, `Size`, `BoxParentData`, child box
 layout, and rectangular hit testing out of protocol-neutral `RenderObject` and
@@ -146,6 +147,24 @@ and renderer failure remain terminal. SurfaceRenderer construction and
 destruction are raster-thread-affine, while RasterSurface is explicitly a
 thread-safe platform bridge.
 
+The initial Sliver slice adds finite, non-negative `SliverConstraints`,
+normalized `SliverGeometry`, `SliverParentData`, and a cached `RenderSliver`
+layout protocol without adding box geometry to protocol-neutral
+`RenderObject`. `RenderViewport` is a vertical RenderBox externally and accepts
+only Sliver children internally; `RenderSliverToBoxAdapter` accepts at most one
+box child. All protocol and cardinality checks happen before tree mutation.
+
+Declarative `Viewport` and `SliverToBoxAdapter` Views retain their RenderObjects
+across scroll updates. Multiple sequential Slivers compute local scroll,
+remaining paint, parent paint offsets, and maximum scroll extent. A retained
+`ClipRectLayer` and matching DisplayList clip commands preserve viewport clips
+through immutable snapshots and compatibility flattening. Protocol-neutral
+paint recording now dispatches offsets and clips without unchecked box casts.
+Tests cover validation, compile-time geometry separation, transactional protocol
+rejection, partial and fully offscreen painting, clipping, translated hit-test
+paths, immutable old snapshots, equal-update layout reuse, and composition-only
+movement of repaint-boundary content.
+
 ## Verification
 
 The prototype has been built and tested with:
@@ -166,6 +185,9 @@ The prototype has been built and tested with:
   owning type erasure will follow profiling.
 - The current DisplayList is a deterministic test representation rather than a
   GPU command encoding.
+- The initial Sliver implementation lays out static Slivers eagerly and supports
+  only a vertical axis. A lazy child manager and cache-range list protocol are
+  still required for true Element-level virtualized scrolling.
 - `DisplayListRenderer` consumes LayerTree on the raster worker but still
   flattens it to the headless DisplayList representation; a GPU layer consumer
   is not implemented yet.
@@ -181,5 +203,5 @@ The prototype has been built and tested with:
 ## Next Milestone
 
 Run the Win32 text-input suite against a real message-pumped HWND and native
-IMEs to finish M2 verification. M3 continues with raster-thread submission, a
-production GPU layer consumer, Sliver layout/virtualization, and semantics.
+IMEs to finish M2 verification. M3 continues with a production GPU layer
+consumer, lazy Sliver list virtualization, and semantics.

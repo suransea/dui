@@ -349,6 +349,21 @@ DisplayList flattening for compatibility. Old submitted snapshots must remain
 valid after RenderObject unmount, clean boundaries must retain layer identity,
 and changing one boundary must not repaint clean ancestors or siblings.
 
+The initial Sliver slice introduces validated `SliverConstraints` and
+`SliverGeometry`, protocol-specific parent data and layout caching, and a
+vertical `RenderViewport` as the explicit box-to-Sliver adapter. A
+`RenderSliverToBoxAdapter` bridges back to one box child. Viewport clipping must
+remain represented in immutable LayerTrees and compatibility DisplayLists;
+paint and hit testing must exclude fully offscreen Slivers and preserve local
+coordinates for partially visible content. Cross-protocol child adoption and a
+multi-box update to the single-box adapter must fail before tree mutation.
+Declarative updates must retain Viewport and Sliver RenderObject identity, and
+scrolling a repaint-boundary box must recompose its offset without repainting
+its boundary-local content. This slice establishes the protocol but does not
+complete virtualized scrolling: M3 still requires a lazy child manager that
+constructs and retains only the visible/cache range rather than eagerly
+materializing every Element through `ForEach`.
+
 Raster submission uses one owned Renderer on one worker thread and queues only
 immutable LayerTree snapshots. Submission is thread-safe and FIFO. Stop is
 non-blocking, rejects future submissions, cancels queued frames, and permits the
