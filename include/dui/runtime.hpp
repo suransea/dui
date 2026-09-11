@@ -148,6 +148,9 @@ private:
     std::unique_ptr<ResourceValue> value;
   };
 
+  using LazyRangeRealizer = void (*)(Element&, BuildOwner&, std::size_t, std::size_t,
+                                     std::uint64_t);
+
   Element(Id id, std::uint64_t generation, std::size_t depth, TypeToken view_type, Key key,
           std::string debug_name)
     : id_(id), generation_(generation), depth_(depth), view_type_(view_type), key_(std::move(key)),
@@ -170,6 +173,9 @@ private:
   std::unordered_map<const void*, std::unique_ptr<EnvironmentSlot>> environment_;
   std::unordered_map<std::uint64_t, ResourceSlot> resources_;
   std::any descriptor_;
+  std::vector<Key> lazy_keys_;
+  std::uint64_t lazy_revision_{};
+  LazyRangeRealizer lazy_range_realizer_{};
   void (*rebuild_)(Element&, BuildOwner&){};
   std::optional<std::size_t> active_branch_;
   std::unique_ptr<RenderObject> render_object_;
@@ -242,6 +248,7 @@ private:
   [[nodiscard]] Element* resolve(Element::Id id, std::uint64_t generation) const;
   void clear_dependencies(Element& element);
   void synchronize_render_tree();
+  [[nodiscard]] bool realize_lazy_children();
   void forget_dependency(Element::Id id, std::uint64_t generation, DependencySource& dependency);
 
   template <class T>
@@ -260,6 +267,7 @@ private:
   std::unordered_map<PointerId, std::shared_ptr<PointerTapRoute>> pointer_tap_routes_;
   FocusManager focus_manager_;
   bool reconciling_{};
+  bool framing_{};
 };
 
 namespace detail {
@@ -272,6 +280,23 @@ struct ElementAccess {
   static std::string& debug_value(Element& element) { return element.debug_value_; }
 
   static std::any& descriptor(Element& element) { return element.descriptor_; }
+
+  static RenderObject* render_object(Element& element) { return element.render_object_.get(); }
+
+  static std::vector<Key>& lazy_keys(Element& element) { return element.lazy_keys_; }
+
+  static std::uint64_t install_lazy_model(Element& element, std::any descriptor,
+                                          std::vector<Key> keys,
+                                          Element::LazyRangeRealizer realizer) {
+    element.descriptor_ = std::move(descriptor);
+    element.lazy_keys_ = std::move(keys);
+    element.lazy_range_realizer_ = realizer;
+    ++element.lazy_revision_;
+    if (element.lazy_revision_ == 0) {
+      ++element.lazy_revision_;
+    }
+    return element.lazy_revision_;
+  }
 
   static bool dirty(const Element& element) { return element.dirty_; }
 

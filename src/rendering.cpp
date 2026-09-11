@@ -676,8 +676,48 @@ void RenderSliverFixedExtentList::set_item_extent(double item_extent) {
   mark_needs_layout();
 }
 
+void RenderSliverFixedExtentList::set_lazy_model(std::size_t logical_child_count,
+                                                 std::uint64_t revision) {
+  if (lazy_ && logical_child_count_ == logical_child_count && model_revision_ == revision) {
+    return;
+  }
+  lazy_ = true;
+  logical_child_count_ = logical_child_count;
+  model_revision_ = revision;
+  requested_child_range_.reset();
+  mark_needs_layout();
+}
+
+void RenderSliverFixedExtentList::set_mounted_range(std::size_t first, std::size_t count,
+                                                    std::uint64_t revision) {
+  if (!lazy_ || revision != model_revision_ || first > logical_child_count_ ||
+      count > logical_child_count_ - first) {
+    throw std::logic_error("Mounted Sliver range does not match the lazy model");
+  }
+  first_mounted_index_ = first;
+  mounted_child_count_ = count;
+  mounted_revision_ = revision;
+  requested_child_range_.reset();
+  mark_needs_layout();
+}
+
+void RenderSliverFixedExtentList::clear_lazy_model() {
+  if (!lazy_) {
+    return;
+  }
+  lazy_ = false;
+  logical_child_count_ = 0;
+  first_mounted_index_ = 0;
+  mounted_child_count_ = 0;
+  model_revision_ = 0;
+  mounted_revision_ = 0;
+  requested_child_range_.reset();
+  mark_needs_layout();
+}
+
 void RenderSliverFixedExtentList::perform_layout() {
-  const double child_count = static_cast<double>(children().size());
+  const std::size_t logical_count = lazy_ ? logical_child_count_ : children().size();
+  const double child_count = static_cast<double>(logical_count);
   const double scroll_extent = child_count * item_extent_;
   if (!std::isfinite(scroll_extent)) {
     throw std::overflow_error("Sliver fixed-extent list scroll extent overflowed");
@@ -687,22 +727,39 @@ void RenderSliverFixedExtentList::perform_layout() {
     std::min(std::max(0.0, scroll_extent - constraints().scroll_offset()),
              constraints().remaining_paint_extent());
   first_visible_index_ =
-    first_item_at(constraints().scroll_offset(), item_extent_, children().size(), scroll_extent);
+    first_item_at(constraints().scroll_offset(), item_extent_, logical_count, scroll_extent);
   if (visible_extent == 0.0) {
     visible_child_count_ = 0;
   } else {
     const std::size_t trailing_index = first_item_starting_at_or_after_viewport_position(
-      constraints().scroll_offset(), visible_extent, item_extent_, children().size());
+      constraints().scroll_offset(), visible_extent, item_extent_, logical_count);
     visible_child_count_ = trailing_index - first_visible_index_;
   }
+
+  const std::size_t visible_end = first_visible_index_ + visible_child_count_;
+  if (lazy_ &&
+      (mounted_revision_ != model_revision_ || first_visible_index_ < first_mounted_index_ ||
+       visible_end > first_mounted_index_ + mounted_child_count_ ||
+       mounted_child_count_ != children().size())) {
+    requested_child_range_ = ChildRange{first_visible_index_, visible_end, model_revision_};
+    first_visible_child_ = 0;
+    visible_child_count_ = 0;
+    set_geometry({scroll_extent, visible_extent, scroll_extent, 0.0,
+                  constraints().scroll_offset() > 0.0 || visible_extent < scroll_extent});
+    return;
+  }
+
+  requested_child_range_.reset();
+  first_visible_child_ = lazy_ ? first_visible_index_ - first_mounted_index_ : first_visible_index_;
 
   const BoxConstraints child_constraints{constraints().cross_axis_extent(),
                                          constraints().cross_axis_extent(), item_extent_,
                                          item_extent_};
-  const std::size_t end = first_visible_index_ + visible_child_count_;
-  for (std::size_t index = first_visible_index_; index < end; ++index) {
-    const double item_start = static_cast<double>(index) * item_extent_;
-    layout_box_child(*children()[index], child_constraints,
+  const std::size_t end = first_visible_child_ + visible_child_count_;
+  for (std::size_t child_index = first_visible_child_; child_index < end; ++child_index) {
+    const std::size_t logical_index = lazy_ ? first_mounted_index_ + child_index : child_index;
+    const double item_start = static_cast<double>(logical_index) * item_extent_;
+    layout_box_child(*children()[child_index], child_constraints,
                      {0.0, static_cast<double>(static_cast<long double>(item_start) -
                                                constraints().scroll_offset())});
   }
@@ -711,19 +768,24 @@ void RenderSliverFixedExtentList::perform_layout() {
 }
 
 bool RenderSliverFixedExtentList::hit_test_protocol(HitTestResult& result, Offset position) {
-  const std::size_t end = first_visible_index_ + visible_child_count_;
-  if (needs_layout() || !has_constraints() || first_visible_index_ > end ||
-      end > children().size() || position.x < 0.0 ||
+  const std::size_t visible_end = first_visible_index_ + visible_child_count_;
+  const std::size_t child_end = first_visible_child_ + visible_child_count_;
+  if (needs_layout() || !has_constraints() || first_visible_index_ > visible_end ||
+      child_end > children().size() || position.x < 0.0 ||
       position.x >= constraints().cross_axis_extent() || position.y < 0.0 ||
       position.y >= geometry().hit_test_extent()) {
     return false;
   }
   const std::size_t candidate = item_at_viewport_position(constraints().scroll_offset(), position.y,
-                                                          item_extent_, children().size());
-  if (candidate < first_visible_index_ || candidate >= end) {
+                                                          item_extent_, logical_child_count());
+  if (candidate < first_visible_index_ || candidate >= visible_end) {
     return false;
   }
-  auto* child = static_cast<RenderBox*>(children()[candidate]);
+  const std::size_t child_index = lazy_ ? candidate - first_mounted_index_ : candidate;
+  if (child_index >= child_end) {
+    return false;
+  }
+  auto* child = static_cast<RenderBox*>(children()[child_index]);
   const Offset local_position{position.x, position.y - child->offset().y};
   if (child->hit_test(result, local_position)) {
     result.add({this, position});
@@ -1121,10 +1183,12 @@ void RenderOwner::compose_boundary(RenderBox& boundary) {
   dirty_compositing_.erase(&boundary);
 }
 
-LayerTree RenderOwner::layer_frame(BoxConstraints viewport) {
+void RenderOwner::layout(BoxConstraints viewport) {
   root_->layout(viewport);
   dirty_layout_.clear();
+}
 
+LayerTree RenderOwner::composite_frame() {
   if (dirty_paint_.empty() && dirty_compositing_.empty() && last_layer_tree_.root() != nullptr) {
     return last_layer_tree_;
   }
@@ -1134,6 +1198,11 @@ LayerTree RenderOwner::layer_frame(BoxConstraints viewport) {
   dirty_compositing_.clear();
   last_layer_tree_ = LayerTree{root_->size(), root_->retained_layer_};
   return last_layer_tree_;
+}
+
+LayerTree RenderOwner::layer_frame(BoxConstraints viewport) {
+  layout(viewport);
+  return composite_frame();
 }
 
 DisplayList RenderOwner::frame(BoxConstraints viewport) { return layer_frame(viewport).flatten(); }

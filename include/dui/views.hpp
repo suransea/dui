@@ -2,12 +2,14 @@
 
 #include "dui/runtime.hpp"
 
+#include <cmath>
 #include <functional>
 #include <optional>
 #include <ranges>
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 
@@ -222,6 +224,34 @@ template <class Range, class KeyFunction, class Builder> struct ForEach {
 template <class R, class K, class B>
 ForEach(R&&, K&&, B&&) -> ForEach<std::decay_t<R>, std::decay_t<K>, std::decay_t<B>>;
 
+template <class Item, class KeyFunction, class Builder> struct LazyForEach {
+  std::vector<Item> items;
+  KeyFunction key_function;
+  Builder builder;
+};
+
+template <std::ranges::input_range Range, class KeyFunction, class Builder>
+[[nodiscard]] auto lazy_for_each(Range&& range, KeyFunction&& key_function, Builder&& builder) {
+  using Item = std::ranges::range_value_t<Range>;
+  std::vector<Item> items;
+  if constexpr (std::ranges::sized_range<Range>) {
+    items.reserve(std::ranges::size(range));
+  }
+  if constexpr (std::is_lvalue_reference_v<Range&&>) {
+    for (const auto& item : range) {
+      items.push_back(item);
+    }
+  } else {
+    auto iterator = std::ranges::begin(range);
+    const auto end = std::ranges::end(range);
+    for (; iterator != end; ++iterator) {
+      items.push_back(std::ranges::iter_move(iterator));
+    }
+  }
+  return LazyForEach<Item, std::decay_t<KeyFunction>, std::decay_t<Builder>>{
+    std::move(items), std::forward<KeyFunction>(key_function), std::forward<Builder>(builder)};
+}
+
 template <class T>
 concept Component =
   std::copy_constructible<T> && requires(const T& value, BuildContext& context) {
@@ -338,6 +368,55 @@ template <class T> consteval bool has_box_protocol();
 
 template <class T> consteval bool has_sliver_protocol();
 
+template <class T> consteval bool has_single_box_protocol();
+
+template <class T> struct SingleBoxProtocol {
+  static constexpr bool value = false;
+};
+
+template <> struct SingleBoxProtocol<Text> {
+  static constexpr bool value = true;
+};
+template <> struct SingleBoxProtocol<Image> {
+  static constexpr bool value = true;
+};
+template <class... C> struct SingleBoxProtocol<VStack<C...>> {
+  static constexpr bool value = true;
+};
+template <class... C> struct SingleBoxProtocol<HStack<C...>> {
+  static constexpr bool value = true;
+};
+template <class... C> struct SingleBoxProtocol<Stack<C...>> {
+  static constexpr bool value = true;
+};
+template <class... S> struct SingleBoxProtocol<Viewport<S...>> {
+  static constexpr bool value = true;
+};
+template <class C> struct SingleBoxProtocol<Padding<C>> {
+  static constexpr bool value = true;
+};
+template <class C> struct SingleBoxProtocol<ColoredBox<C>> {
+  static constexpr bool value = true;
+};
+template <class C> struct SingleBoxProtocol<RepaintBoundary<C>> {
+  static constexpr bool value = true;
+};
+template <class C> struct SingleBoxProtocol<GestureDetector<C>> {
+  static constexpr bool value = true;
+};
+template <class C> struct SingleBoxProtocol<FocusView<C>> {
+  static constexpr bool value = true;
+};
+template <class C, class... V> struct SingleBoxProtocol<EnvironmentScope<C, V...>> {
+  static constexpr bool value = has_single_box_protocol<C>();
+};
+template <class... C> struct SingleBoxProtocol<Fragment<C...>> {
+  static constexpr bool value = sizeof...(C) == 1 && (has_single_box_protocol<C>() && ...);
+};
+template <class L, class R> struct SingleBoxProtocol<Choice<L, R>> {
+  static constexpr bool value = has_single_box_protocol<L>() && has_single_box_protocol<R>();
+};
+
 template <class... C> struct ViewProtocol<Fragment<C...>> {
   static constexpr bool box = (has_box_protocol<C>() && ...);
   static constexpr bool sliver = (has_sliver_protocol<C>() && ...);
@@ -386,6 +465,16 @@ template <class T> consteval bool has_sliver_protocol() {
   }
 }
 
+template <class T> consteval bool has_single_box_protocol() {
+  using V = std::remove_cvref_t<T>;
+  if constexpr (Component<V>) {
+    using Child = decltype(std::declval<const V&>().build(std::declval<BuildContext&>()));
+    return has_single_box_protocol<Child>();
+  } else {
+    return SingleBoxProtocol<V>::value;
+  }
+}
+
 template <class V> [[nodiscard]] constexpr std::string_view view_name() {
   if constexpr (std::same_as<std::remove_cvref_t<V>, Text>) {
     return "Text";
@@ -410,6 +499,10 @@ template <class Child> void update_view(Element&, const SliverToBoxAdapter<Child
 
 template <class... Children>
 void update_view(Element&, const SliverFixedExtentList<Children...>&, BuildOwner&);
+
+template <class Item, class KeyFunction, class Builder>
+void update_view(Element&, const SliverFixedExtentList<LazyForEach<Item, KeyFunction, Builder>>&,
+                 BuildOwner&);
 
 template <class... Children> void update_view(Element&, const Fragment<Children...>&, BuildOwner&);
 
@@ -520,6 +613,21 @@ template <class Range, class KeyFunction, class Builder>
 
 namespace detail {
 
+struct KeyHash {
+  [[nodiscard]] std::size_t operator()(const Key& key) const {
+    return std::visit(
+      [](const auto& value) {
+        using Value = std::remove_cvref_t<decltype(value)>;
+        if constexpr (std::same_as<Value, std::monostate>) {
+          return std::size_t{};
+        } else {
+          return std::hash<Value>{}(value);
+        }
+      },
+      key.value());
+  }
+};
+
 inline void update_view(Element& element, const Text& text, BuildOwner& owner) {
   ElementAccess::debug_value(element) = text.value;
   auto& render_text =
@@ -615,9 +723,110 @@ void update_view(Element& element, const SliverFixedExtentList<Children...>& vie
                  BuildOwner& owner) {
   static_assert((has_box_protocol<Children>() && ...),
                 "SliverFixedExtentList children must use the box protocol");
-  ElementAccess::ensure_render_object<RenderSliverFixedExtentList>(element, owner, view.item_extent)
-    .set_item_extent(view.item_extent);
+  auto& render = ElementAccess::ensure_render_object<RenderSliverFixedExtentList>(element, owner,
+                                                                                  view.item_extent);
+  render.set_item_extent(view.item_extent);
+  render.clear_lazy_model();
   update_static_children(element, view.children, owner);
+}
+
+template <class Item, class KeyFunction, class Builder>
+void realize_lazy_fixed_extent_range(Element& element, BuildOwner& owner, std::size_t first,
+                                     std::size_t end, std::uint64_t revision) {
+  using Source = LazyForEach<Item, KeyFunction, Builder>;
+  using Child = std::decay_t<std::invoke_result_t<const Builder&, const Item&>>;
+
+  const auto& source = std::any_cast<const Source&>(ElementAccess::descriptor(element));
+  const auto& keys = ElementAccess::lazy_keys(element);
+  if (end > keys.size() || first > end) {
+    throw std::logic_error("Lazy Sliver requested an invalid child range");
+  }
+
+  struct PendingChild {
+    Key key;
+    Child view;
+  };
+  std::vector<PendingChild> pending;
+  pending.reserve(end - first);
+  auto item = source.items.begin() + static_cast<std::ptrdiff_t>(first);
+  for (std::size_t index = first; index < end; ++index, ++item) {
+    pending.push_back({keys[index], std::invoke(source.builder, *item)});
+  }
+
+  auto& element_children = ElementAccess::children(element);
+  std::vector<std::unique_ptr<Element>> previous = std::move(element_children);
+  std::vector<std::unique_ptr<Element>> next;
+  next.reserve(pending.size());
+  for (const PendingChild& pending_child : pending) {
+    auto found = std::ranges::find_if(previous, [&](const auto& candidate) {
+      return candidate != nullptr && candidate->key() == pending_child.key &&
+             candidate->view_type() == type_token<Child>();
+    });
+    std::unique_ptr<Element> child;
+    if (found != previous.end()) {
+      child = std::move(*found);
+    }
+    try {
+      reconcile_child(child, pending_child.view, owner, &element, pending_child.key);
+    } catch (...) {
+      ElementAccess::unmount(owner, child);
+      for (auto& remaining : previous) {
+        ElementAccess::unmount(owner, remaining);
+      }
+      for (auto& mounted : next) {
+        ElementAccess::unmount(owner, mounted);
+      }
+      element_children.clear();
+      throw;
+    }
+    next.push_back(std::move(child));
+  }
+  for (auto& child : previous) {
+    ElementAccess::unmount(owner, child);
+  }
+  element_children = std::move(next);
+  auto* render = dynamic_cast<RenderSliverFixedExtentList*>(ElementAccess::render_object(element));
+  if (render == nullptr) {
+    throw std::logic_error("Lazy Sliver Element lost its RenderSliver");
+  }
+  render->set_mounted_range(first, end - first, revision);
+}
+
+template <class Item, class KeyFunction, class Builder>
+void update_view(Element& element,
+                 const SliverFixedExtentList<LazyForEach<Item, KeyFunction, Builder>>& view,
+                 BuildOwner& owner) {
+  using Source = LazyForEach<Item, KeyFunction, Builder>;
+  static_assert(std::copy_constructible<Source>,
+                "Lazy Sliver ForEach must own a copyable deferred source");
+  using Child = std::decay_t<std::invoke_result_t<const Builder&, const Item&>>;
+  static_assert(has_single_box_protocol<Child>(),
+                "Lazy Sliver items must produce exactly one box-protocol RenderObject");
+  if (!std::isfinite(view.item_extent) || view.item_extent <= 0.0) {
+    throw std::invalid_argument("Sliver fixed item extent must be finite and positive");
+  }
+
+  const Source& source = std::get<0>(view.children);
+  std::vector<Key> keys;
+  keys.reserve(std::ranges::size(source.items));
+  std::unordered_set<Key, KeyHash> unique_keys;
+  unique_keys.reserve(std::ranges::size(source.items));
+  for (const auto& item : source.items) {
+    Key key = make_key(std::invoke(source.key_function, item));
+    if (!unique_keys.insert(key).second) {
+      throw std::logic_error("ForEach contains a duplicate key: " + key.to_string());
+    }
+    keys.push_back(std::move(key));
+  }
+
+  auto descriptor = std::make_any<Source>(source);
+  auto& render = ElementAccess::ensure_render_object<RenderSliverFixedExtentList>(element, owner,
+                                                                                  view.item_extent);
+  render.set_item_extent(view.item_extent);
+  const std::uint64_t revision =
+    ElementAccess::install_lazy_model(element, std::move(descriptor), std::move(keys),
+                                      &realize_lazy_fixed_extent_range<Item, KeyFunction, Builder>);
+  render.set_lazy_model(std::ranges::size(source.items), revision);
 }
 
 template <class... Children>

@@ -23,8 +23,10 @@ output, and preserves hit-test coordinates while scrolling. Lazy list child
 creation remains a later virtualization slice. `SliverFixedExtentList` uses
 constant-time visible-index calculation and limits layout, paint traversal, and
 render-tree hit testing to the visible range. Its current declarative children
-are still reconciled and synchronized eagerly, so complete frame setup remains
-linear in the total child count.
+can use `lazy_for_each` to snapshot model data while constructing, reconciling,
+and synchronizing only the visible keyed Elements. Ordinary `ForEach` remains
+the explicit eager path. Extra cache extent and offscreen keep-alive policy are
+still in progress.
 
 ```cpp
 struct Counter {

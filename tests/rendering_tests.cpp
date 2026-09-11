@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdlib>
 #include <exception>
+#include <initializer_list>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -224,6 +225,10 @@ static_assert(dui::detail::has_box_protocol<BoxComponent>());
 static_assert(!dui::detail::has_sliver_protocol<BoxComponent>());
 static_assert(
   dui::detail::has_sliver_protocol<dui::SliverFixedExtentList<dui::Text, BoxComponent>>());
+static_assert(dui::detail::has_single_box_protocol<dui::Text>());
+static_assert(dui::detail::has_single_box_protocol<BoxComponent>());
+static_assert(!dui::detail::has_single_box_protocol<dui::Optional<dui::Text>>());
+static_assert(!dui::detail::has_single_box_protocol<dui::Fragment<dui::Text, dui::Text>>());
 
 void render_tree_rejects_invalid_children_without_mutation() {
   dui::RenderOwner owner;
@@ -846,6 +851,122 @@ void dirty_fixed_extent_sliver_rejects_stale_hit_range() {
   require(list.visible_child_count() == 0, "shortened overscrolled list did not recover");
 }
 
+void lazy_fixed_extent_list_builds_only_visible_keyed_elements() {
+  struct Item {
+    int id;
+  };
+
+  std::vector<Item> items;
+  for (int id = 0; id < 100; ++id) {
+    items.push_back({id});
+  }
+  int builder_calls = 0;
+  auto builder = [&](const Item& item) {
+    ++builder_calls;
+    return dui::Text{"item " + std::to_string(item.id)};
+  };
+  const auto make_view = [&](const std::vector<Item>& values, double offset) {
+    return dui::Viewport{offset, dui::SliverFixedExtentList{
+                                   16.0, dui::lazy_for_each(values, dui::key<&Item::id>, builder)}};
+  };
+
+  dui::BuildOwner owner;
+  owner.render(make_view(items, 160.0));
+  require(builder_calls == 0, "lazy Sliver invoked an item builder during root render");
+  auto* list_element = owner.root()->children().front().get();
+  require(list_element->children().empty(), "lazy Sliver eagerly mounted item Elements");
+
+  const auto first = owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+  require(builder_calls == 2, "first lazy frame did not build exactly the visible range");
+  require(list_element->children().size() == 2, "first lazy frame mounted the wrong item count");
+  require(list_element->children()[0]->key() == dui::Key{std::int64_t{10}} &&
+            list_element->children()[1]->key() == dui::Key{std::int64_t{11}},
+          "deep initial scroll built the wrong keyed items");
+  require(!first.dump().contains("item 0"), "deep initial scroll built or painted index zero");
+  require(first.dump().contains("text(\"item 10\", 0.0, 0.0)") &&
+            first.dump().contains("text(\"item 11\", 0.0, 16.0)"),
+          "lazy first frame painted incomplete content");
+
+  auto* viewport = dynamic_cast<dui::RenderViewport*>(owner.root()->render_object());
+  auto* list = dynamic_cast<dui::RenderSliverFixedExtentList*>(viewport->children().front());
+  require(list->logical_child_count() == 100 && list->first_mounted_index() == 10,
+          "lazy RenderSliver lost logical or mounted range metadata");
+  require(list->children().size() == 2, "render synchronization visited eager lazy-list children");
+  require(list->children()[0]->paint_count() == 1 && list->children()[1]->paint_count() == 1,
+          "lazy probe pass painted before child realization stabilized");
+
+  const auto retained_id = list_element->children()[1]->id();
+  const auto mounts = owner.mount_count();
+  const auto unmounts = owner.unmount_count();
+  owner.render(make_view(items, 176.0));
+  require(builder_calls == 2, "lazy Sliver invoked item builders before layout requested a range");
+  const auto second = owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+  require(builder_calls == 4, "scrolling did not build exactly the next visible range");
+  require(list_element->children()[0]->key() == dui::Key{std::int64_t{11}} &&
+            list_element->children()[0]->id() == retained_id,
+          "overlapping lazy item did not retain keyed Element identity");
+  require(list_element->children()[1]->key() == dui::Key{std::int64_t{12}},
+          "scrolling mounted the wrong trailing item");
+  require(owner.mount_count() == mounts + 1 && owner.unmount_count() == unmounts + 1,
+          "lazy range transition did not mount and evict exactly one item");
+  require(!second.dump().contains("item 10") && second.dump().contains("item 12"),
+          "lazy range transition painted stale content");
+
+  std::vector<Item> duplicate = items;
+  duplicate[90].id = duplicate[91].id;
+  const auto cached_first_id = list_element->children()[0]->id();
+  const auto cached_second_id = list_element->children()[1]->id();
+  const int calls_before_duplicate = builder_calls;
+  bool rejected = false;
+  try {
+    owner.render(make_view(duplicate, 176.0));
+  } catch (const std::logic_error&) {
+    rejected = true;
+  }
+  require(rejected, "duplicate keys outside the lazy range were accepted");
+  require(builder_calls == calls_before_duplicate,
+          "duplicate-key validation invoked a lazy item builder");
+  require(list_element->children()[0]->id() == cached_first_id &&
+            list_element->children()[1]->id() == cached_second_id,
+          "duplicate-key rejection mutated the mounted lazy range");
+  const auto recovered = owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+  require(recovered.commands() == second.commands(),
+          "duplicate-key rejection did not preserve the previous lazy frame");
+}
+
+void lazy_source_owns_temporary_data_and_preserves_eager_foreach() {
+  struct Item {
+    int id;
+  };
+  const auto item_builder = [](const Item& item) {
+    return dui::Text{"owned " + std::to_string(item.id)};
+  };
+
+  dui::BuildOwner lazy_owner;
+  lazy_owner.render(dui::Viewport{
+    0.0,
+    dui::SliverFixedExtentList{16.0, dui::lazy_for_each(std::initializer_list<Item>{{1}, {2}, {3}},
+                                                        dui::key<&Item::id>, item_builder)}});
+  const auto lazy_frame = lazy_owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+  require(lazy_frame.dump().contains("owned 1") && lazy_frame.dump().contains("owned 2"),
+          "lazy source did not retain an owned copy of temporary data");
+
+  int eager_builds = 0;
+  auto eager_builder = [&](const Item& item) {
+    ++eager_builds;
+    return dui::Text{"eager " + std::to_string(item.id)};
+  };
+  const std::vector<Item> eager_items{{1}, {2}, {3}};
+  dui::BuildOwner eager_owner;
+  eager_owner.render(
+    dui::Viewport{0.0, dui::SliverFixedExtentList{
+                         16.0, dui::ForEach{eager_items, dui::key<&Item::id>, eager_builder}}});
+  require(eager_builds == 3, "ordinary ForEach no longer preserved eager behavior");
+  const auto eager_frame = eager_owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+  require(eager_frame.dump().contains("eager 1") && eager_frame.dump().contains("eager 2"),
+          "eager ForEach compatibility path produced incorrect output");
+}
+
 void nested_boundary_recomposes_without_repainting_outer_content() {
   dui::BuildOwner owner;
   const auto make_view = [](std::uint32_t color) {
@@ -1063,6 +1184,8 @@ int main() {
     fixed_extent_sliver_rejects_invalid_extent_before_mutation();
     fixed_extent_sliver_respects_fractional_boundaries();
     dirty_fixed_extent_sliver_rejects_stale_hit_range();
+    lazy_fixed_extent_list_builds_only_visible_keyed_elements();
+    lazy_source_owns_temporary_data_and_preserves_eager_foreach();
     nested_boundary_recomposes_without_repainting_outer_content();
     stack_hit_test_uses_reverse_paint_order_and_records_path();
     color_update_repaints_without_layout();

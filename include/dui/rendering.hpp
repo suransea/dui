@@ -174,6 +174,7 @@ private:
 };
 
 class RenderOwner;
+class BuildOwner;
 class RenderObject;
 class RenderBox;
 class RenderSliver;
@@ -379,12 +380,30 @@ private:
 
 class RenderSliverFixedExtentList final : public RenderSliver {
 public:
+  struct ChildRange {
+    std::size_t first{};
+    std::size_t end{};
+    std::uint64_t revision{};
+
+    friend bool operator==(const ChildRange&, const ChildRange&) = default;
+  };
+
   RenderSliverFixedExtentList(RenderOwner& owner, double item_extent);
 
   void set_item_extent(double item_extent);
+  void set_lazy_model(std::size_t logical_child_count, std::uint64_t revision);
+  void set_mounted_range(std::size_t first, std::size_t count, std::uint64_t revision);
+  void clear_lazy_model();
   [[nodiscard]] double item_extent() const { return item_extent_; }
   [[nodiscard]] std::size_t first_visible_index() const { return first_visible_index_; }
   [[nodiscard]] std::size_t visible_child_count() const { return visible_child_count_; }
+  [[nodiscard]] std::size_t logical_child_count() const {
+    return lazy_ ? logical_child_count_ : children().size();
+  }
+  [[nodiscard]] std::size_t first_mounted_index() const { return first_mounted_index_; }
+  [[nodiscard]] std::optional<ChildRange> requested_child_range() const {
+    return requested_child_range_;
+  }
 
 protected:
   void perform_layout() override;
@@ -392,11 +411,19 @@ protected:
 private:
   [[nodiscard]] bool hit_test_protocol(HitTestResult& result, Offset position) override;
   [[nodiscard]] std::pair<std::size_t, std::size_t> paint_child_range() const override {
-    return {first_visible_index_, first_visible_index_ + visible_child_count_};
+    return {first_visible_child_, first_visible_child_ + visible_child_count_};
   }
 
   double item_extent_;
+  bool lazy_{};
+  std::size_t logical_child_count_{};
+  std::size_t first_mounted_index_{};
+  std::size_t mounted_child_count_{};
+  std::uint64_t model_revision_{};
+  std::uint64_t mounted_revision_{};
+  std::optional<ChildRange> requested_child_range_;
   std::size_t first_visible_index_{};
+  std::size_t first_visible_child_{};
   std::size_t visible_child_count_{};
 };
 
@@ -553,6 +580,7 @@ public:
   [[nodiscard]] const RenderView& root() const { return *root_; }
 
 private:
+  friend class BuildOwner;
   friend class RenderObject;
   friend class RenderBox;
   friend class RenderSliver;
@@ -563,6 +591,8 @@ private:
   void ensure_boundary(RenderBox& boundary);
   void record_boundary(RenderBox& boundary);
   void compose_boundary(RenderBox& boundary);
+  void layout(BoxConstraints viewport);
+  [[nodiscard]] LayerTree composite_frame();
   [[nodiscard]] RenderObject::Id register_object(RenderObject& object);
   void forget(RenderObject& object);
 

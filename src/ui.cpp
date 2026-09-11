@@ -211,12 +211,72 @@ void BuildOwner::synchronize_render_tree() {
   render_owner_.set_roots(roots);
 }
 
+bool BuildOwner::realize_lazy_children() {
+  if (reconciling_) {
+    throw std::logic_error("BuildOwner does not allow reentrant lazy realization");
+  }
+  bool realized = false;
+  reconciling_ = true;
+  try {
+    const auto visit = [&](auto&& self, Element& element) -> void {
+      if (element.lazy_range_realizer_ != nullptr) {
+        auto* render = dynamic_cast<RenderSliverFixedExtentList*>(element.render_object_.get());
+        if (render == nullptr) {
+          throw std::logic_error("Lazy child manager requires RenderSliverFixedExtentList");
+        }
+        const auto request = render->requested_child_range();
+        if (request.has_value() && request->revision == element.lazy_revision_) {
+          element.lazy_range_realizer_(element, *this, request->first, request->end,
+                                       request->revision);
+          realized = true;
+        }
+      }
+      for (const auto& child : element.children_) {
+        if (child != nullptr) {
+          self(self, *child);
+        }
+      }
+    };
+    if (root_ != nullptr) {
+      visit(visit, *root_);
+    }
+    reconciling_ = false;
+  } catch (...) {
+    reconciling_ = false;
+    throw;
+  }
+  return realized;
+}
+
 LayerTree BuildOwner::layer_frame(BoxConstraints viewport) {
-  flush();
-  synchronize_render_tree();
-  LayerTree result = render_owner_.layer_frame(viewport);
-  last_viewport_ = viewport;
-  return result;
+  if (framing_) {
+    throw std::logic_error("BuildOwner does not allow reentrant frame production");
+  }
+  framing_ = true;
+  try {
+    flush();
+    constexpr std::size_t max_stabilization_passes = 16;
+    bool stable = false;
+    for (std::size_t pass = 0; pass < max_stabilization_passes; ++pass) {
+      synchronize_render_tree();
+      render_owner_.layout(viewport);
+      if (!realize_lazy_children()) {
+        stable = true;
+        break;
+      }
+      flush();
+    }
+    if (!stable) {
+      throw std::logic_error("Lazy child layout did not stabilize");
+    }
+    LayerTree result = render_owner_.composite_frame();
+    last_viewport_ = viewport;
+    framing_ = false;
+    return result;
+  } catch (...) {
+    framing_ = false;
+    throw;
+  }
 }
 
 DisplayList BuildOwner::frame(BoxConstraints viewport) { return layer_frame(viewport).flatten(); }

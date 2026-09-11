@@ -365,6 +365,23 @@ extent invalidates layout without replacing the RenderSliver. This is
 layout/paint virtualization only: eager declarative child reconciliation remains
 explicitly outside the completion claim until a lazy child manager exists.
 
+The first lazy child-manager slice uses an explicit `lazy_for_each` source under
+`SliverFixedExtentList`; ordinary `ForEach` retains eager semantics. The lazy
+source takes an owning vector snapshot before `render()` returns, validates all
+logical keys before committing a model revision, and invokes no item builder
+until layout requests a logical range. Each item must produce exactly one
+top-level box RenderObject so logical and mounted child indices remain defined.
+Render layout publishes a passive range request, BuildOwner realizes it only
+after the layout stack unwinds, then repeats synchronization and layout before a
+single final paint. A bounded stabilization loop must reject reentrant or
+non-converging realization deterministically. Initial acceptance requires deep
+first-frame scrolling to avoid building index zero, visible-range-only Element
+mounting, keyed identity retention across overlapping ranges, immediate
+disposal outside the requested range, temporary-source lifetime safety, and
+offscreen duplicate-key rejection before any item builder invocation. This
+slice uses zero extra cache; configurable cache extent and keep-alive lifecycle
+remain required before declaring cached virtual scrolling complete.
+
 Raster submission uses one owned Renderer on one worker thread and queues only
 immutable LayerTree snapshots. Submission is thread-safe and FIFO. Stop is
 non-blocking, rejects future submissions, cancels queued frames, and permits the

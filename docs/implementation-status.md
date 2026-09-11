@@ -173,10 +173,29 @@ The retained recorder consumes protocol-provided child index ranges, so paint
 recording and render-tree hit testing also avoid visiting offscreen children.
 Tests cover initial and newly visible layout counts, exact item boundaries,
 scroll translation, paint culling, hit testing, overscroll, maximum extent, and
-transactional rejection of invalid item extents. Element/View construction is
-still eager, and render-tree synchronization still visits every Element, so
-public frame setup is not yet independent of total item count and full
-virtualization is not claimed.
+transactional rejection of invalid item extents. With ordinary static children
+or `ForEach`, Element/View construction remains eager and render-tree
+synchronization visits every Element; callers opt into Element-level
+virtualization with the lazy source described below.
+
+The first lazy child-manager slice adds explicit `lazy_for_each` data sources.
+They copy or move input items into an owned vector snapshot while retaining
+ordinary `ForEach` as the eager compatibility path. Model updates scan and
+validate every key without invoking item builders, then commit a revision to the
+RenderSliver. Lazy item types are compile-time constrained to exactly one
+top-level box RenderObject, including through eligible Components and
+single-child transparent wrappers.
+
+Frame production now separates RenderOwner layout from composition. A Sliver
+with missing children publishes its logical range request without painting;
+after layout unwinds, BuildOwner realizes keyed Elements, synchronizes their
+RenderObjects, and repeats layout until stable before painting once. Tests cover
+deep initial scroll, visible-only builder and Element counts, logical-to-mounted
+index mapping, overlapping keyed identity, exact eviction counts, duplicate
+keys outside the visible range, temporary initializer-list ownership, probe
+passes without intermediate paint, and unchanged eager `ForEach` behavior.
+The requested range currently equals the visible range. Configurable cache
+extent and retained offscreen Element lifecycle remain outstanding.
 
 ## Verification
 
@@ -200,8 +219,9 @@ The prototype has been built and tested with:
   GPU command encoding.
 - The initial Sliver implementation lays out static Slivers eagerly and supports
   only a vertical axis. Fixed-extent lists virtualize layout, paint traversal,
-  and hit testing, but a lazy child manager and cache-range lifecycle are still
-  required for true Element-level virtualized scrolling.
+  and hit testing; `lazy_for_each` additionally virtualizes visible Element
+  construction and synchronization. A cache-range keep-alive lifecycle is still
+  required for cached virtualized scrolling.
 - `DisplayListRenderer` consumes LayerTree on the raster worker but still
   flattens it to the headless DisplayList representation; a GPU layer consumer
   is not implemented yet.
