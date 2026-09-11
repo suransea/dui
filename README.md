@@ -20,7 +20,11 @@ terminal failure.
 A vertical `Viewport` is the explicit box-to-Sliver boundary. It accepts
 `SliverToBoxAdapter` children, computes scroll and paint geometry, clips retained
 output, and preserves hit-test coordinates while scrolling. Lazy list child
-creation remains a later virtualization slice.
+creation remains a later virtualization slice. `SliverFixedExtentList` uses
+constant-time visible-index calculation and limits layout, paint traversal, and
+render-tree hit testing to the visible range. Its current declarative children
+are still reconciled and synchronized eagerly, so complete frame setup remains
+linear in the total child count.
 
 ```cpp
 struct Counter {
@@ -42,7 +46,8 @@ architecture and implementation roadmap.
 
 Implemented layout Views include `VStack`, `HStack`, `Stack`, `Padding`,
 `ColoredBox`, `Viewport`, and `SliverToBoxAdapter`; primitives include `Text`
-and `Image`. A deterministic DisplayList serves as the test renderer.
+and `Image`. `SliverFixedExtentList` provides the first scrolling-list protocol.
+A deterministic DisplayList serves as the test renderer.
 
 The interaction foundation includes typed Environment values, Signals, named
 RAII resources, cancellation, GestureArena, focus/key routing, IME contracts,

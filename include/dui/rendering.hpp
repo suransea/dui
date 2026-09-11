@@ -263,7 +263,9 @@ private:
     [[nodiscard]] virtual bool hit_test_protocol(HitTestResult&, Offset) { return false; }
     [[nodiscard]] virtual Offset paint_offset() const { return {}; }
     [[nodiscard]] virtual std::optional<Rect> paint_clip(Offset) const { return std::nullopt; }
-    [[nodiscard]] virtual bool should_paint_children() const { return true; }
+    [[nodiscard]] virtual std::pair<std::size_t, std::size_t> paint_child_range() const {
+        return {0, children_.size()};
+    }
     void detach_from_owner();
 
     RenderOwner* owner_;
@@ -331,6 +333,7 @@ public:
 
 protected:
     [[nodiscard]] const SliverConstraints& constraints() const { return *constraints_; }
+    [[nodiscard]] bool has_constraints() const { return constraints_.has_value(); }
     void set_geometry(SliverGeometry geometry) { geometry_ = geometry; }
     void layout_box_child(RenderObject& child, BoxConstraints constraints, Offset offset);
     virtual void perform_layout() = 0;
@@ -341,8 +344,10 @@ private:
     void validate_child_protocol(const RenderObject& child) const final;
     [[nodiscard]] bool hit_test_protocol(HitTestResult& result, Offset position) override;
     [[nodiscard]] Offset paint_offset() const override { return parent_data_.paint_offset; }
-    [[nodiscard]] bool should_paint_children() const override {
-        return geometry_.paint_extent() > 0.0;
+    [[nodiscard]] std::pair<std::size_t, std::size_t> paint_child_range() const override {
+        return geometry_.paint_extent() > 0.0
+            ? std::pair<std::size_t, std::size_t>{0, children().size()}
+            : std::pair<std::size_t, std::size_t>{0, 0};
     }
     void layout(SliverConstraints constraints);
 
@@ -382,6 +387,29 @@ protected:
 
 private:
     void validate_child_count(std::size_t count) const override;
+};
+
+class RenderSliverFixedExtentList final : public RenderSliver {
+public:
+    RenderSliverFixedExtentList(RenderOwner& owner, double item_extent);
+
+    void set_item_extent(double item_extent);
+    [[nodiscard]] double item_extent() const { return item_extent_; }
+    [[nodiscard]] std::size_t first_visible_index() const { return first_visible_index_; }
+    [[nodiscard]] std::size_t visible_child_count() const { return visible_child_count_; }
+
+protected:
+    void perform_layout() override;
+
+private:
+    [[nodiscard]] bool hit_test_protocol(HitTestResult& result, Offset position) override;
+    [[nodiscard]] std::pair<std::size_t, std::size_t> paint_child_range() const override {
+        return {first_visible_index_, first_visible_index_ + visible_child_count_};
+    }
+
+    double item_extent_;
+    std::size_t first_visible_index_{};
+    std::size_t visible_child_count_{};
 };
 
 class RenderText final : public RenderBox {

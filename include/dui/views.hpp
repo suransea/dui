@@ -80,6 +80,18 @@ template<class Child>
 SliverToBoxAdapter(Child) -> SliverToBoxAdapter<Child>;
 
 template<class... Children>
+struct SliverFixedExtentList {
+    double item_extent;
+    std::tuple<Children...> children;
+
+    explicit SliverFixedExtentList(double extent, Children... values) :
+        item_extent(extent), children(std::move(values)...) {}
+};
+
+template<class... Children>
+SliverFixedExtentList(double, Children...) -> SliverFixedExtentList<Children...>;
+
+template<class... Children>
 struct Fragment {
     std::tuple<Children...> children;
 
@@ -302,6 +314,9 @@ template<class Child>
 inline constexpr bool is_builtin_view<SliverToBoxAdapter<Child>> = true;
 
 template<class... Children>
+inline constexpr bool is_builtin_view<SliverFixedExtentList<Children...>> = true;
+
+template<class... Children>
 inline constexpr bool is_builtin_view<Fragment<Children...>> = true;
 
 template<class Child, class... Values>
@@ -349,6 +364,7 @@ template<class... C> struct ViewProtocol<HStack<C...>> { static constexpr bool b
 template<class... C> struct ViewProtocol<Stack<C...>> { static constexpr bool box = true; static constexpr bool sliver = false; };
 template<class... S> struct ViewProtocol<Viewport<S...>> { static constexpr bool box = true; static constexpr bool sliver = false; };
 template<class C> struct ViewProtocol<SliverToBoxAdapter<C>> { static constexpr bool box = false; static constexpr bool sliver = true; };
+template<class... C> struct ViewProtocol<SliverFixedExtentList<C...>> { static constexpr bool box = false; static constexpr bool sliver = true; };
 template<class C> struct ViewProtocol<Padding<C>> { static constexpr bool box = true; static constexpr bool sliver = false; };
 template<class C> struct ViewProtocol<ColoredBox<C>> { static constexpr bool box = true; static constexpr bool sliver = false; };
 template<class C> struct ViewProtocol<RepaintBoundary<C>> { static constexpr bool box = true; static constexpr bool sliver = false; };
@@ -446,6 +462,9 @@ template<class Child>
 void update_view(Element&, const SliverToBoxAdapter<Child>&, BuildOwner&);
 
 template<class... Children>
+void update_view(Element&, const SliverFixedExtentList<Children...>&, BuildOwner&);
+
+template<class... Children>
 void update_view(Element&, const Fragment<Children...>&, BuildOwner&);
 
 template<class Child, class... Values>
@@ -513,6 +532,11 @@ template<class... Slivers>
 template<class Child>
 [[nodiscard]] std::string debug_name(const SliverToBoxAdapter<Child>&) {
     return "SliverToBoxAdapter";
+}
+
+template<class... Children>
+[[nodiscard]] std::string debug_name(const SliverFixedExtentList<Children...>&) {
+    return "SliverFixedExtentList";
 }
 
 template<class... Children>
@@ -664,6 +688,24 @@ void update_view(Element& element, const SliverToBoxAdapter<Child>& view, BuildO
         children.push_back(nullptr);
     }
     reconcile_child(children.front(), view.child, owner, &element, Key{});
+}
+
+template<class... Children>
+void update_view(
+    Element& element,
+    const SliverFixedExtentList<Children...>& view,
+    BuildOwner& owner
+) {
+    static_assert(
+        (has_box_protocol<Children>() && ...),
+        "SliverFixedExtentList children must use the box protocol"
+    );
+    ElementAccess::ensure_render_object<RenderSliverFixedExtentList>(
+        element,
+        owner,
+        view.item_extent
+    ).set_item_extent(view.item_extent);
+    update_static_children(element, view.children, owner);
 }
 
 template<class... Children>

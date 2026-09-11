@@ -364,6 +364,16 @@ complete virtualized scrolling: M3 still requires a lazy child manager that
 constructs and retains only the visible/cache range rather than eagerly
 materializing every Element through `ForEach`.
 
+The next virtualization slice adds a fixed-extent Sliver list. Given a positive
+finite item extent, it must compute the first and trailing visible indices
+without laying out preceding children; only the visible contiguous range may be
+laid out, traversed for paint, or considered for hit testing. Exact item and
+viewport boundaries use half-open intervals, overscroll produces an empty
+visible range, total scroll-extent overflow is rejected, and changing the item
+extent invalidates layout without replacing the RenderSliver. This is
+layout/paint virtualization only: eager declarative child reconciliation remains
+explicitly outside the completion claim until a lazy child manager exists.
+
 Raster submission uses one owned Renderer on one worker thread and queues only
 immutable LayerTree snapshots. Submission is thread-safe and FIFO. Stop is
 non-blocking, rejects future submissions, cancels queued frames, and permits the

@@ -165,6 +165,19 @@ rejection, partial and fully offscreen painting, clipping, translated hit-test
 paths, immutable old snapshots, equal-update layout reuse, and composition-only
 movement of repaint-boundary content.
 
+The fixed-extent Sliver slice adds declarative and render-level
+`SliverFixedExtentList`. It validates a positive finite item extent, computes a
+contiguous visible range directly from scroll offset and viewport paint extent,
+and lays out only that range with tight cross-axis and item-axis constraints.
+The retained recorder consumes protocol-provided child index ranges, so paint
+recording and render-tree hit testing also avoid visiting offscreen children.
+Tests cover initial and newly visible layout counts, exact item boundaries,
+scroll translation, paint culling, hit testing, overscroll, maximum extent, and
+transactional rejection of invalid item extents. Element/View construction is
+still eager, and render-tree synchronization still visits every Element, so
+public frame setup is not yet independent of total item count and full
+virtualization is not claimed.
+
 ## Verification
 
 The prototype has been built and tested with:
@@ -186,8 +199,9 @@ The prototype has been built and tested with:
 - The current DisplayList is a deterministic test representation rather than a
   GPU command encoding.
 - The initial Sliver implementation lays out static Slivers eagerly and supports
-  only a vertical axis. A lazy child manager and cache-range list protocol are
-  still required for true Element-level virtualized scrolling.
+  only a vertical axis. Fixed-extent lists virtualize layout, paint traversal,
+  and hit testing, but a lazy child manager and cache-range lifecycle are still
+  required for true Element-level virtualized scrolling.
 - `DisplayListRenderer` consumes LayerTree on the raster worker but still
   flattens it to the headless DisplayList representation; a GPU layer consumer
   is not implemented yet.

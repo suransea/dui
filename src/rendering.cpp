@@ -616,6 +616,184 @@ void RenderSliverToBoxAdapter::validate_child_count(std::size_t count) const {
     }
 }
 
+namespace {
+
+void validate_item_extent(double item_extent) {
+    if (!std::isfinite(item_extent) || item_extent <= 0.0) {
+        throw std::invalid_argument("Sliver fixed item extent must be finite and positive");
+    }
+}
+
+std::size_t first_item_at(
+    double offset,
+    double item_extent,
+    std::size_t child_count,
+    double scroll_extent
+) {
+    if (child_count == 0 || offset >= scroll_extent) {
+        return child_count;
+    }
+    std::size_t first = 0;
+    std::size_t last = child_count;
+    while (first < last) {
+        const std::size_t middle = first + (last - first) / 2;
+        const double item_start = static_cast<double>(middle) * item_extent;
+        if (item_start <= offset) {
+            first = middle + 1;
+        } else {
+            last = middle;
+        }
+    }
+    return first == 0 ? 0 : first - 1;
+}
+
+std::size_t first_item_starting_at_or_after_viewport_position(
+    double scroll_offset,
+    double viewport_position,
+    double item_extent,
+    std::size_t child_count
+) {
+    std::size_t first = 0;
+    std::size_t last = child_count;
+    while (first < last) {
+        const std::size_t middle = first + (last - first) / 2;
+        const double item_start = static_cast<double>(middle) * item_extent;
+        const long double relative_start = static_cast<long double>(item_start) - scroll_offset;
+        if (relative_start < static_cast<long double>(viewport_position)) {
+            first = middle + 1;
+        } else {
+            last = middle;
+        }
+    }
+    return first;
+}
+
+std::size_t item_at_viewport_position(
+    double scroll_offset,
+    double viewport_position,
+    double item_extent,
+    std::size_t child_count
+) {
+    std::size_t first = 0;
+    std::size_t last = child_count;
+    while (first < last) {
+        const std::size_t middle = first + (last - first) / 2;
+        const double item_start = static_cast<double>(middle) * item_extent;
+        const long double relative_start = static_cast<long double>(item_start) - scroll_offset;
+        if (relative_start <= static_cast<long double>(viewport_position)) {
+            first = middle + 1;
+        } else {
+            last = middle;
+        }
+    }
+    return first == 0 ? child_count : first - 1;
+}
+
+} // namespace
+
+RenderSliverFixedExtentList::RenderSliverFixedExtentList(
+    RenderOwner& owner,
+    double item_extent
+) : RenderSliver(owner, true), item_extent_(item_extent) {
+    validate_item_extent(item_extent);
+}
+
+void RenderSliverFixedExtentList::set_item_extent(double item_extent) {
+    validate_item_extent(item_extent);
+    if (item_extent_ == item_extent) {
+        return;
+    }
+    item_extent_ = item_extent;
+    mark_needs_layout();
+}
+
+void RenderSliverFixedExtentList::perform_layout() {
+    const double child_count = static_cast<double>(children().size());
+    const double scroll_extent = child_count * item_extent_;
+    if (!std::isfinite(scroll_extent)) {
+        throw std::overflow_error("Sliver fixed-extent list scroll extent overflowed");
+    }
+
+    const double visible_extent = std::min(
+        std::max(0.0, scroll_extent - constraints().scroll_offset()),
+        constraints().remaining_paint_extent()
+    );
+    first_visible_index_ = first_item_at(
+        constraints().scroll_offset(),
+        item_extent_,
+        children().size(),
+        scroll_extent
+    );
+    if (visible_extent == 0.0) {
+        visible_child_count_ = 0;
+    } else {
+        const std::size_t trailing_index = first_item_starting_at_or_after_viewport_position(
+            constraints().scroll_offset(),
+            visible_extent,
+            item_extent_,
+            children().size()
+        );
+        visible_child_count_ = trailing_index - first_visible_index_;
+    }
+
+    const BoxConstraints child_constraints{
+        constraints().cross_axis_extent(),
+        constraints().cross_axis_extent(),
+        item_extent_,
+        item_extent_
+    };
+    const std::size_t end = first_visible_index_ + visible_child_count_;
+    for (std::size_t index = first_visible_index_; index < end; ++index) {
+        const double item_start = static_cast<double>(index) * item_extent_;
+        layout_box_child(
+            *children()[index],
+            child_constraints,
+            {0.0, static_cast<double>(
+                static_cast<long double>(item_start) - constraints().scroll_offset()
+            )}
+        );
+    }
+    set_geometry({
+        scroll_extent,
+        visible_extent,
+        scroll_extent,
+        visible_extent,
+        constraints().scroll_offset() > 0.0 || visible_extent < scroll_extent
+    });
+}
+
+bool RenderSliverFixedExtentList::hit_test_protocol(
+    HitTestResult& result,
+    Offset position
+) {
+    const std::size_t end = first_visible_index_ + visible_child_count_;
+    if (needs_layout() || !has_constraints()
+        || first_visible_index_ > end || end > children().size()
+        || position.x < 0.0 || position.x >= constraints().cross_axis_extent()
+        || position.y < 0.0 || position.y >= geometry().hit_test_extent()) {
+        return false;
+    }
+    const std::size_t candidate = item_at_viewport_position(
+        constraints().scroll_offset(),
+        position.y,
+        item_extent_,
+        children().size()
+    );
+    if (candidate < first_visible_index_ || candidate >= end) {
+        return false;
+    }
+    auto* child = static_cast<RenderBox*>(children()[candidate]);
+    const Offset local_position{
+        position.x,
+        position.y - child->offset().y
+    };
+    if (child->hit_test(result, local_position)) {
+        result.add({this, position});
+        return true;
+    }
+    return false;
+}
+
 bool RenderBox::hit_test_protocol(HitTestResult& result, Offset position) {
     if (!size_.contains(position)) {
         return false;
@@ -948,20 +1126,23 @@ void RenderOwner::record_boundary(RenderBox& boundary) {
         PaintingContext context{recorder.builder};
         object.paint(context, offset);
         recorder.painted.push_back(&object);
-        if (object.should_paint_children()) {
-            for (RenderObject* child : object.children_) {
-                const Offset child_offset = offset + child->paint_offset();
-                if (auto* child_box = dynamic_cast<RenderBox*>(child);
-                    child_box != nullptr && child_box->is_repaint_boundary()) {
-                    ensure_boundary(*child_box);
-                    recorder.flush();
-                    recorder.chunks.emplace_back(RenderBox::BoundaryChild{
-                        child_box->id(),
-                        child_offset
-                    });
-                } else {
-                    self(self, *child, child_offset);
-                }
+        const auto [first_child, last_child] = object.paint_child_range();
+        if (first_child > last_child || last_child > object.children_.size()) {
+            throw std::logic_error("RenderObject returned an invalid paint child range");
+        }
+        for (std::size_t index = first_child; index < last_child; ++index) {
+            RenderObject* child = object.children_[index];
+            const Offset child_offset = offset + child->paint_offset();
+            if (auto* child_box = dynamic_cast<RenderBox*>(child);
+                child_box != nullptr && child_box->is_repaint_boundary()) {
+                ensure_boundary(*child_box);
+                recorder.flush();
+                recorder.chunks.emplace_back(RenderBox::BoundaryChild{
+                    child_box->id(),
+                    child_offset
+                });
+            } else {
+                self(self, *child, child_offset);
             }
         }
         if (clip.has_value()) {

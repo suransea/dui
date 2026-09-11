@@ -233,6 +233,9 @@ static_assert(dui::detail::has_sliver_protocol<SliverComponent>());
 static_assert(!dui::detail::has_box_protocol<SliverComponent>());
 static_assert(dui::detail::has_box_protocol<BoxComponent>());
 static_assert(!dui::detail::has_sliver_protocol<BoxComponent>());
+static_assert(dui::detail::has_sliver_protocol<
+    dui::SliverFixedExtentList<dui::Text, BoxComponent>
+>());
 
 void render_tree_rejects_invalid_children_without_mutation() {
     dui::RenderOwner owner;
@@ -755,6 +758,188 @@ void viewport_scroll_reuses_repaint_boundary_layer() {
             "scrolling did not recompose the retained boundary at its new offset");
 }
 
+void fixed_extent_sliver_virtualizes_layout_paint_and_hit_testing() {
+    dui::BuildOwner owner;
+    const auto make_view = [](double offset) {
+        return dui::Viewport{
+            offset,
+            dui::SliverFixedExtentList{
+                16.0,
+                dui::Text{"A"},
+                dui::Text{"B"},
+                dui::Text{"C"},
+                dui::Text{"D"},
+                dui::Text{"E"}
+            }
+        };
+    };
+    owner.render(make_view(16.0));
+    const auto first = owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+    auto* viewport = dynamic_cast<dui::RenderViewport*>(owner.root()->render_object());
+    auto* list = dynamic_cast<dui::RenderSliverFixedExtentList*>(viewport->children().front());
+    require(list != nullptr, "SliverFixedExtentList did not create its RenderSliver");
+    require(list->first_visible_index() == 1 && list->visible_child_count() == 2,
+            "fixed-extent Sliver calculated the wrong visible range");
+    require(list->geometry().scroll_extent() == 80.0, "fixed-extent Sliver scroll extent is wrong");
+    require(viewport->max_scroll_extent() == 48.0, "fixed-extent viewport max scroll is wrong");
+    require(
+        first.dump() ==
+            "push_clip_rect(0.0, 0.0, 100.0, 32.0)\n"
+            "text(\"B\", 0.0, 0.0)\n"
+            "text(\"C\", 0.0, 16.0)\n"
+            "pop_clip()\n",
+        "fixed-extent Sliver painted outside its visible range"
+    );
+    require(list->children()[0]->layout_count() == 0, "leading offscreen item was laid out");
+    require(list->children()[1]->layout_count() == 1, "first visible item was not laid out once");
+    require(list->children()[2]->layout_count() == 1, "second visible item was not laid out once");
+    require(list->children()[3]->layout_count() == 0, "trailing offscreen item was laid out");
+    require(owner.hit_test({1.0, 1.0}) == list->children()[1], "first visible list item did not hit");
+    require(owner.hit_test({1.0, 17.0}) == list->children()[2], "second visible list item did not hit");
+    require(owner.hit_test({1.0, 32.0}) == nullptr, "list hit at the viewport trailing edge");
+
+    owner.render(make_view(32.0));
+    const auto second = owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+    require(list->first_visible_index() == 2 && list->visible_child_count() == 2,
+            "scrolling did not advance the visible range at an exact item boundary");
+    require(!second.dump().contains("text(\"B\""), "item leaving visibility was still painted");
+    require(second.dump().contains("text(\"C\", 0.0, 0.0)"), "retained visible item was misplaced");
+    require(second.dump().contains("text(\"D\", 0.0, 16.0)"), "newly visible item was not painted");
+    require(list->children()[1]->layout_count() == 1, "offscreen item was laid out again");
+    require(list->children()[2]->layout_count() == 1, "retained item repeated layout unnecessarily");
+    require(list->children()[3]->layout_count() == 1, "newly visible item was not laid out");
+
+    owner.render(make_view(100.0));
+    const auto overscrolled = owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+    require(list->visible_child_count() == 0, "overscrolled list retained visible children");
+    require(!overscrolled.dump().contains("text("), "overscrolled list painted a child");
+}
+
+void fixed_extent_sliver_rejects_invalid_extent_before_mutation() {
+    dui::RenderOwner owner;
+    dui::RenderSliverFixedExtentList list{owner, 16.0};
+    for (const double invalid : {0.0, -1.0, std::numeric_limits<double>::infinity()}) {
+        bool rejected = false;
+        try {
+            list.set_item_extent(invalid);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected, "invalid fixed item extent was accepted");
+        require(list.item_extent() == 16.0, "invalid item extent mutated the previous value");
+    }
+}
+
+void fixed_extent_sliver_respects_fractional_boundaries() {
+    dui::BuildOwner owner;
+    const double scroll_boundary = 3.0 * 0.1;
+    const double viewport_extent = 5.0 * 0.1 - scroll_boundary;
+    owner.render(dui::Viewport{
+        scroll_boundary,
+        dui::SliverFixedExtentList{
+            0.1,
+            dui::Text{"A"},
+            dui::Text{"B"},
+            dui::Text{"C"},
+            dui::Text{"D"},
+            dui::Text{"E"},
+            dui::Text{"F"}
+        }
+    });
+    static_cast<void>(owner.frame(dui::BoxConstraints::tight({1.0, viewport_extent})));
+    auto* list = dynamic_cast<dui::RenderSliverFixedExtentList*>(
+        owner.root()->render_object()->children().front()
+    );
+    require(list->first_visible_index() == 3 && list->visible_child_count() == 2,
+            "fractional item boundary selected the wrong visible range");
+    require(list->children()[2]->layout_count() == 0,
+            "fractional leading boundary laid out the previous item");
+    require(list->children()[5]->layout_count() == 0,
+            "fractional trailing boundary laid out the next item");
+    require(owner.hit_test({0.5, 0.0}) == list->children()[3],
+            "fractional leading boundary hit the previous item");
+    require(owner.hit_test({0.5, 0.1}) == list->children()[4],
+            "fractional item boundary hit the wrong item");
+
+    owner.render(dui::Viewport{
+        5.0 * 0.1,
+        dui::SliverFixedExtentList{
+            0.1,
+            dui::Text{"A"},
+            dui::Text{"B"},
+            dui::Text{"C"},
+            dui::Text{"D"},
+            dui::Text{"E"},
+            dui::Text{"F"}
+        }
+    });
+    static_cast<void>(owner.frame(dui::BoxConstraints::tight({1.0, 0.1})));
+    require(list->first_visible_index() == 5 && list->visible_child_count() == 1,
+            "computed double item boundary produced platform-dependent indexing");
+    require(owner.hit_test({0.5, 0.0}) == list->children()[5],
+            "computed double item boundary hit the previous item");
+
+    dui::BuildOwner large_owner;
+    large_owner.render(dui::Viewport{
+        1.0e18 - 128.0,
+        dui::SliverFixedExtentList{
+            1.0e18,
+            dui::Text{"large A"},
+            dui::Text{"large B"}
+        }
+    });
+    static_cast<void>(large_owner.frame(dui::BoxConstraints::tight({1.0, 1000.0})));
+    auto* large_list = dynamic_cast<dui::RenderSliverFixedExtentList*>(
+        large_owner.root()->render_object()->children().front()
+    );
+    require(large_list->first_visible_index() == 0 && large_list->visible_child_count() == 2,
+            "large-coordinate arithmetic erased a genuine visible range");
+
+    dui::BuildOwner local_owner;
+    local_owner.render(dui::Viewport{
+        1.0e18,
+        dui::SliverFixedExtentList{
+            1.0e18,
+            dui::Text{"before"},
+            dui::Text{"visible"}
+        }
+    });
+    const auto local_frame = local_owner.frame(dui::BoxConstraints::tight({1.0, 1.0}));
+    auto* local_list = dynamic_cast<dui::RenderSliverFixedExtentList*>(
+        local_owner.root()->render_object()->children().front()
+    );
+    require(local_list->first_visible_index() == 1 && local_list->visible_child_count() == 1,
+            "large scroll offset absorbed a viewport-local paint extent");
+    require(local_frame.dump().contains("text(\"visible\", 0.0, 0.0)"),
+            "large scroll offset failed to paint local content");
+    require(local_owner.hit_test({0.5, 0.5}) == local_list->children()[1],
+            "large scroll offset absorbed a viewport-local hit coordinate");
+}
+
+void dirty_fixed_extent_sliver_rejects_stale_hit_range() {
+    dui::RenderOwner owner;
+    dui::RenderViewport viewport{owner, 16.0};
+    dui::RenderSliverFixedExtentList list{owner, 16.0};
+    dui::RenderText first{owner, "A"};
+    dui::RenderText second{owner, "B"};
+    dui::RenderText third{owner, "C"};
+    std::array<dui::RenderObject*, 3> initial_children{&first, &second, &third};
+    list.set_children(initial_children);
+    std::array<dui::RenderObject*, 1> viewport_children{&list};
+    viewport.set_children(viewport_children);
+    std::array<dui::RenderObject*, 1> roots{&viewport};
+    owner.set_roots(roots);
+    static_cast<void>(owner.frame(dui::BoxConstraints::tight({100.0, 16.0})));
+    require(list.first_visible_index() == 1, "test did not establish a nonzero cached range");
+
+    std::array<dui::RenderObject*, 1> shortened{&first};
+    list.set_children(shortened);
+    dui::HitTestResult result;
+    require(!list.hit_test(result, {1.0, 1.0}), "dirty Sliver used a stale hit-test range");
+    static_cast<void>(owner.frame(dui::BoxConstraints::tight({100.0, 16.0})));
+    require(list.visible_child_count() == 0, "shortened overscrolled list did not recover");
+}
+
 void nested_boundary_recomposes_without_repainting_outer_content() {
     dui::BuildOwner owner;
     const auto make_view = [](std::uint32_t color) {
@@ -986,6 +1171,10 @@ int main() {
         view_protocols_propagate_through_components_and_fragments();
         viewport_scroll_update_preserves_identity_and_culls_offscreen_content();
         viewport_scroll_reuses_repaint_boundary_layer();
+        fixed_extent_sliver_virtualizes_layout_paint_and_hit_testing();
+        fixed_extent_sliver_rejects_invalid_extent_before_mutation();
+        fixed_extent_sliver_respects_fractional_boundaries();
+        dirty_fixed_extent_sliver_rejects_stale_hit_range();
         nested_boundary_recomposes_without_repainting_outer_content();
         stack_hit_test_uses_reverse_paint_order_and_records_path();
         color_update_repaints_without_layout();
