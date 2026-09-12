@@ -9,6 +9,7 @@
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -253,10 +254,50 @@ template <class Range, class KeyFunction, class Builder> struct ForEach {
 template <class R, class K, class B>
 ForEach(R&&, K&&, B&&) -> ForEach<std::decay_t<R>, std::decay_t<K>, std::decay_t<B>>;
 
-template <class Item, class KeyFunction, class Builder> struct LazyForEach {
-  std::vector<Item> items;
-  KeyFunction key_function;
-  Builder builder;
+struct NeverKeepAlive {
+  template <class Item> [[nodiscard]] constexpr bool operator()(const Item&) const { return false; }
+};
+
+template <class Item, class KeyFunction, class Builder, class KeepAlive = NeverKeepAlive>
+class LazyForEach {
+public:
+  template <class Predicate> [[nodiscard]] auto keep_alive_when(Predicate&& predicate) && {
+    using Policy = std::decay_t<Predicate>;
+    static_assert(std::predicate<const Policy&, const Item&>,
+                  "Lazy Sliver keep-alive policy must be a predicate for const items");
+    Policy policy{std::forward<Predicate>(predicate)};
+    std::unordered_set<Key, detail::KeyHash> keep_alive_keys;
+    keep_alive_keys.reserve(items_.size());
+    for (std::size_t index = 0; index < items_.size(); ++index) {
+      if (std::invoke(policy, items_[index])) {
+        keep_alive_keys.insert(keys_[index]);
+      }
+    }
+    return LazyForEach<Item, KeyFunction, Builder, std::decay_t<Predicate>>{
+      std::move(items_), std::move(keys_), std::move(builder_), std::move(keep_alive_keys)};
+  }
+
+  [[nodiscard]] const std::vector<Item>& items() const { return items_; }
+  [[nodiscard]] const std::vector<Key>& keys() const { return keys_; }
+  [[nodiscard]] const Builder& builder() const { return builder_; }
+  [[nodiscard]] const std::unordered_set<Key, detail::KeyHash>& keep_alive_keys() const {
+    return keep_alive_keys_;
+  }
+
+private:
+  template <class, class, class, class> friend class LazyForEach;
+  template <std::ranges::input_range Range, class K, class B>
+  friend auto lazy_for_each(Range&&, K&&, B&&);
+
+  LazyForEach(std::vector<Item> items, std::vector<Key> keys, Builder builder,
+              std::unordered_set<Key, detail::KeyHash> keep_alive_keys)
+    : items_(std::move(items)), keys_(std::move(keys)), builder_(std::move(builder)),
+      keep_alive_keys_(std::move(keep_alive_keys)) {}
+
+  std::vector<Item> items_;
+  std::vector<Key> keys_;
+  Builder builder_;
+  std::unordered_set<Key, detail::KeyHash> keep_alive_keys_;
 };
 
 template <std::ranges::input_range Range, class KeyFunction, class Builder>
@@ -277,8 +318,20 @@ template <std::ranges::input_range Range, class KeyFunction, class Builder>
       items.push_back(std::ranges::iter_move(iterator));
     }
   }
+
+  std::vector<Key> keys;
+  keys.reserve(items.size());
+  std::unordered_set<Key, detail::KeyHash> unique_keys;
+  unique_keys.reserve(items.size());
+  for (const auto& item : items) {
+    Key key = make_key(std::invoke(key_function, item));
+    if (!unique_keys.insert(key).second) {
+      throw std::logic_error("ForEach contains a duplicate key: " + key.to_string());
+    }
+    keys.push_back(std::move(key));
+  }
   return LazyForEach<Item, std::decay_t<KeyFunction>, std::decay_t<Builder>>{
-    std::move(items), std::forward<KeyFunction>(key_function), std::forward<Builder>(builder)};
+    std::move(items), std::move(keys), std::forward<Builder>(builder), {}};
 }
 
 template <class T>
@@ -529,8 +582,9 @@ template <class Child> void update_view(Element&, const SliverToBoxAdapter<Child
 template <class... Children>
 void update_view(Element&, const SliverFixedExtentList<Children...>&, BuildOwner&);
 
-template <class Item, class KeyFunction, class Builder>
-void update_view(Element&, const SliverFixedExtentList<LazyForEach<Item, KeyFunction, Builder>>&,
+template <class Item, class KeyFunction, class Builder, class KeepAlive>
+void update_view(Element&,
+                 const SliverFixedExtentList<LazyForEach<Item, KeyFunction, Builder, KeepAlive>>&,
                  BuildOwner&);
 
 template <class... Children> void update_view(Element&, const Fragment<Children...>&, BuildOwner&);
@@ -642,21 +696,6 @@ template <class Range, class KeyFunction, class Builder>
 
 namespace detail {
 
-struct KeyHash {
-  [[nodiscard]] std::size_t operator()(const Key& key) const {
-    return std::visit(
-      [](const auto& value) {
-        using Value = std::remove_cvref_t<decltype(value)>;
-        if constexpr (std::same_as<Value, std::monostate>) {
-          return std::size_t{};
-        } else {
-          return std::hash<Value>{}(value);
-        }
-      },
-      key.value());
-  }
-};
-
 inline void update_view(Element& element, const Text& text, BuildOwner& owner) {
   ElementAccess::debug_value(element) = text.value;
   auto& render_text =
@@ -763,10 +802,10 @@ void update_view(Element& element, const SliverFixedExtentList<Children...>& vie
   update_static_children(element, view.children, owner);
 }
 
-template <class Item, class KeyFunction, class Builder>
+template <class Item, class KeyFunction, class Builder, class KeepAlive>
 void realize_lazy_fixed_extent_range(Element& element, BuildOwner& owner, std::size_t first,
                                      std::size_t end, std::uint64_t revision) {
-  using Source = LazyForEach<Item, KeyFunction, Builder>;
+  using Source = LazyForEach<Item, KeyFunction, Builder, KeepAlive>;
   using Child = std::decay_t<std::invoke_result_t<const Builder&, const Item&>>;
 
   const auto& source = std::any_cast<const Source&>(ElementAccess::descriptor(element));
@@ -781,23 +820,41 @@ void realize_lazy_fixed_extent_range(Element& element, BuildOwner& owner, std::s
   };
   std::vector<PendingChild> pending;
   pending.reserve(end - first);
-  auto item = source.items.begin() + static_cast<std::ptrdiff_t>(first);
+  auto item = source.items().begin() + static_cast<std::ptrdiff_t>(first);
   for (std::size_t index = first; index < end; ++index, ++item) {
-    pending.push_back({keys[index], std::invoke(source.builder, *item)});
+    pending.push_back({keys[index], std::invoke(source.builder(), *item)});
   }
 
   auto& element_children = ElementAccess::children(element);
-  std::vector<std::unique_ptr<Element>> previous = std::move(element_children);
+  auto& kept_alive_children = ElementAccess::lazy_kept_alive_children(element);
+  std::unordered_map<Key, std::size_t, KeyHash> previous_indices;
+  previous_indices.reserve(element_children.size());
+  for (std::size_t index = 0; index < element_children.size(); ++index) {
+    previous_indices.emplace(element_children[index]->key(), index);
+  }
+  std::unordered_map<Key, std::size_t, KeyHash> kept_alive_indices;
+  kept_alive_indices.reserve(kept_alive_children.size());
+  for (std::size_t index = 0; index < kept_alive_children.size(); ++index) {
+    kept_alive_indices.emplace(kept_alive_children[index]->key(), index);
+  }
   std::vector<std::unique_ptr<Element>> next;
   next.reserve(pending.size());
+  std::vector<std::unique_ptr<Element>> next_kept_alive;
+  next_kept_alive.reserve(element_children.size() + kept_alive_children.size());
+  std::vector<std::unique_ptr<Element>> previous = std::move(element_children);
+  std::vector<std::unique_ptr<Element>> previous_kept_alive = std::move(kept_alive_children);
   for (const PendingChild& pending_child : pending) {
-    auto found = std::ranges::find_if(previous, [&](const auto& candidate) {
-      return candidate != nullptr && candidate->key() == pending_child.key &&
-             candidate->view_type() == type_token<Child>();
-    });
     std::unique_ptr<Element> child;
-    if (found != previous.end()) {
-      child = std::move(*found);
+    const auto found = previous_indices.find(pending_child.key);
+    if (found != previous_indices.end() &&
+        previous[found->second]->view_type() == type_token<Child>()) {
+      child = std::move(previous[found->second]);
+    } else {
+      const auto kept_alive = kept_alive_indices.find(pending_child.key);
+      if (kept_alive != kept_alive_indices.end() &&
+          previous_kept_alive[kept_alive->second]->view_type() == type_token<Child>()) {
+        child = std::move(previous_kept_alive[kept_alive->second]);
+      }
     }
     try {
       reconcile_child(child, pending_child.view, owner, &element, pending_child.key);
@@ -806,18 +863,36 @@ void realize_lazy_fixed_extent_range(Element& element, BuildOwner& owner, std::s
       for (auto& remaining : previous) {
         ElementAccess::unmount(owner, remaining);
       }
+      for (auto& remaining : previous_kept_alive) {
+        ElementAccess::unmount(owner, remaining);
+      }
       for (auto& mounted : next) {
         ElementAccess::unmount(owner, mounted);
       }
       element_children.clear();
+      kept_alive_children.clear();
       throw;
     }
     next.push_back(std::move(child));
   }
+  const auto retain_or_unmount = [&](std::unique_ptr<Element>& child) {
+    if (child == nullptr) {
+      return;
+    }
+    if (ElementAccess::lazy_keep_alive_keys(element).contains(child->key())) {
+      next_kept_alive.push_back(std::move(child));
+    } else {
+      ElementAccess::unmount(owner, child);
+    }
+  };
   for (auto& child : previous) {
-    ElementAccess::unmount(owner, child);
+    retain_or_unmount(child);
+  }
+  for (auto& child : previous_kept_alive) {
+    retain_or_unmount(child);
   }
   element_children = std::move(next);
+  kept_alive_children = std::move(next_kept_alive);
   auto* render = dynamic_cast<RenderSliverFixedExtentList*>(ElementAccess::render_object(element));
   if (render == nullptr) {
     throw std::logic_error("Lazy Sliver Element lost its RenderSliver");
@@ -825,16 +900,19 @@ void realize_lazy_fixed_extent_range(Element& element, BuildOwner& owner, std::s
   render->set_mounted_range(first, end - first, revision);
 }
 
-template <class Item, class KeyFunction, class Builder>
-void update_view(Element& element,
-                 const SliverFixedExtentList<LazyForEach<Item, KeyFunction, Builder>>& view,
-                 BuildOwner& owner) {
-  using Source = LazyForEach<Item, KeyFunction, Builder>;
+template <class Item, class KeyFunction, class Builder, class KeepAlive>
+void update_view(
+  Element& element,
+  const SliverFixedExtentList<LazyForEach<Item, KeyFunction, Builder, KeepAlive>>& view,
+  BuildOwner& owner) {
+  using Source = LazyForEach<Item, KeyFunction, Builder, KeepAlive>;
   static_assert(std::copy_constructible<Source>,
                 "Lazy Sliver ForEach must own a copyable deferred source");
   using Child = std::decay_t<std::invoke_result_t<const Builder&, const Item&>>;
   static_assert(has_single_box_protocol<Child>(),
                 "Lazy Sliver items must produce exactly one box-protocol RenderObject");
+  static_assert(std::predicate<const KeepAlive&, const Item&>,
+                "Lazy Sliver keep-alive policy must be a predicate for const items");
   if (!std::isfinite(view.item_extent) || view.item_extent <= 0.0) {
     throw std::invalid_argument("Sliver fixed item extent must be finite and positive");
   }
@@ -843,27 +921,25 @@ void update_view(Element& element,
   }
 
   const Source& source = std::get<0>(view.children);
-  std::vector<Key> keys;
-  keys.reserve(std::ranges::size(source.items));
-  std::unordered_set<Key, KeyHash> unique_keys;
-  unique_keys.reserve(std::ranges::size(source.items));
-  for (const auto& item : source.items) {
-    Key key = make_key(std::invoke(source.key_function, item));
-    if (!unique_keys.insert(key).second) {
-      throw std::logic_error("ForEach contains a duplicate key: " + key.to_string());
-    }
-    keys.push_back(std::move(key));
-  }
-
+  std::vector<Key> keys = source.keys();
+  std::unordered_set<Key, KeyHash> keep_alive_keys = source.keep_alive_keys();
   auto descriptor = std::make_any<Source>(source);
   auto& render = ElementAccess::ensure_render_object<RenderSliverFixedExtentList>(element, owner,
                                                                                   view.item_extent);
   render.set_item_extent(view.item_extent);
   render.set_cache_extent(view.cache_extent());
-  const std::uint64_t revision =
-    ElementAccess::install_lazy_model(element, std::move(descriptor), std::move(keys),
-                                      &realize_lazy_fixed_extent_range<Item, KeyFunction, Builder>);
-  render.set_lazy_model(std::ranges::size(source.items), revision);
+  const std::uint64_t revision = ElementAccess::install_lazy_model(
+    element, std::move(descriptor), std::move(keys), std::move(keep_alive_keys),
+    &realize_lazy_fixed_extent_range<Item, KeyFunction, Builder, KeepAlive>);
+  auto& kept_alive_children = ElementAccess::lazy_kept_alive_children(element);
+  std::erase_if(kept_alive_children, [&](auto& child) {
+    if (ElementAccess::lazy_keep_alive_keys(element).contains(child->key())) {
+      return false;
+    }
+    ElementAccess::unmount(owner, child);
+    return true;
+  });
+  render.set_lazy_model(source.items().size(), revision);
 }
 
 template <class... Children>

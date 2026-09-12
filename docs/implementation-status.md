@@ -208,6 +208,22 @@ large-coordinate/overflow behavior. Stabilization counts productive realization
 rounds separately from the final layout probe; a dedicated test accepts the
 sixteenth round and rejects a seventeenth deterministically.
 
+The policy keep-alive slice makes every `LazyForEach` an immutable, prevalidated
+snapshot. `lazy_for_each` materializes its owning item vector and rejects
+duplicate keys before `BuildOwner::render`; `keep_alive_when` evaluates its
+predicate into a key set at the same pre-reconciliation boundary. Selected
+realized items leaving the cache move into a dormant Element bucket that is
+excluded from RenderObject synchronization and lazy range discovery. Keyed
+restoration reuses the exact Element and RenderObject subtree. Policy
+cancellation and model deletion synchronously unmount dormant entries during
+render, invalidating StateHandles, destroying resources, unsubscribing
+dependencies, and applying focus fallback without waiting for a frame.
+Hash-indexed active/dormant extraction keeps range reconciliation linear in the
+managed set rather than quadratic. Tests cover state, resource, RenderObject,
+focus, and key-dispatch identity; dirty dormant rebuild exclusion; never-realized
+items; same- and different-source duplicate transactionality; throwing policy;
+immediate policy/deletion cleanup; owner destruction; and builder-failure retry.
+
 ## Verification
 
 The prototype has been built and tested with:
@@ -231,8 +247,9 @@ The prototype has been built and tested with:
 - The initial Sliver implementation lays out static Slivers eagerly and supports
   only a vertical axis. Fixed-extent lists virtualize layout, paint traversal,
   and hit testing; `lazy_for_each` additionally virtualizes visible Element
-  construction and synchronization with a bounded cache range. Policy-based
-  keep-alive outside that range is not implemented.
+  construction and synchronization with a bounded cache range and optional
+  policy-selected dormant keep-alive. There is no automatic memory-budget or
+  least-recently-used eviction policy for dormant items.
 - `DisplayListRenderer` consumes LayerTree on the raster worker but still
   flattens it to the headless DisplayList representation; a GPU layer consumer
   is not implemented yet.
@@ -249,4 +266,4 @@ The prototype has been built and tested with:
 
 Run the Win32 text-input suite against a real message-pumped HWND and native
 IMEs to finish M2 verification. M3 continues with a production GPU layer
-consumer, policy-based Sliver keep-alive, and semantics.
+consumer, budgeted keep-alive eviction, and semantics.

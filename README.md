@@ -27,8 +27,11 @@ can use `lazy_for_each` to snapshot model data while constructing, reconciling,
 and synchronizing only the visible/cache keyed Elements. An explicit
 `cache_extent(...)` argument retains items intersecting that many logical pixels
 before and after the viewport while keeping them out of layout, paint, and hit
-testing until visible. Ordinary `ForEach` remains the explicit eager path;
-policy-based retention beyond the bounded cache remains future work.
+testing until visible. An owning lazy source can additionally use
+`keep_alive_when(predicate)` to retain selected realized Element subtrees after
+they leave that bounded range; dormant entries preserve state, resources,
+dependencies, and focus identity without remaining attached to the RenderSliver.
+Ordinary `ForEach` remains the explicit eager path.
 
 ```cpp
 struct Counter {

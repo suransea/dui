@@ -83,6 +83,9 @@ public:
   [[nodiscard]] std::size_t update_count() const { return update_count_; }
   [[nodiscard]] bool dirty() const { return dirty_; }
   [[nodiscard]] const std::vector<std::unique_ptr<Element>>& children() const { return children_; }
+  [[nodiscard]] std::size_t kept_alive_child_count() const {
+    return lazy_kept_alive_children_.size();
+  }
   [[nodiscard]] const RenderObject* render_object() const { return render_object_.get(); }
   [[nodiscard]] RenderObject* render_object() { return render_object_.get(); }
 
@@ -168,12 +171,14 @@ private:
   bool rebuilding_dirty_{};
   Element* parent_{};
   std::vector<std::unique_ptr<Element>> children_;
+  std::vector<std::unique_ptr<Element>> lazy_kept_alive_children_;
   std::unordered_map<std::uint64_t, StateSlot> state_;
   std::vector<DependencySource*> dependencies_;
   std::unordered_map<const void*, std::unique_ptr<EnvironmentSlot>> environment_;
   std::unordered_map<std::uint64_t, ResourceSlot> resources_;
   std::any descriptor_;
   std::vector<Key> lazy_keys_;
+  std::unordered_set<Key, detail::KeyHash> lazy_keep_alive_keys_;
   std::uint64_t lazy_revision_{};
   LazyRangeRealizer lazy_range_realizer_{};
   void (*rebuild_)(Element&, BuildOwner&){};
@@ -286,11 +291,21 @@ struct ElementAccess {
 
   static std::vector<Key>& lazy_keys(Element& element) { return element.lazy_keys_; }
 
+  static std::vector<std::unique_ptr<Element>>& lazy_kept_alive_children(Element& element) {
+    return element.lazy_kept_alive_children_;
+  }
+
+  static const std::unordered_set<Key, KeyHash>& lazy_keep_alive_keys(const Element& element) {
+    return element.lazy_keep_alive_keys_;
+  }
+
   static std::uint64_t install_lazy_model(Element& element, std::any descriptor,
                                           std::vector<Key> keys,
+                                          std::unordered_set<Key, KeyHash> keep_alive_keys,
                                           Element::LazyRangeRealizer realizer) {
     element.descriptor_ = std::move(descriptor);
     element.lazy_keys_ = std::move(keys);
+    element.lazy_keep_alive_keys_ = std::move(keep_alive_keys);
     element.lazy_range_realizer_ = realizer;
     ++element.lazy_revision_;
     if (element.lazy_revision_ == 0) {

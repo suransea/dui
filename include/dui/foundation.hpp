@@ -71,6 +71,23 @@ private:
   Value value_;
 };
 
+namespace detail {
+struct KeyHash {
+  [[nodiscard]] std::size_t operator()(const Key& key) const {
+    return std::visit(
+      [](const auto& value) {
+        using Value = std::remove_cvref_t<decltype(value)>;
+        if constexpr (std::same_as<Value, std::monostate>) {
+          return std::size_t{};
+        } else {
+          return std::hash<Value>{}(value);
+        }
+      },
+      key.value());
+  }
+};
+} // namespace detail
+
 template <class T> [[nodiscard]] Key make_key(T&& value) {
   using U = std::remove_cvref_t<T>;
   if constexpr (std::same_as<U, Key>) {

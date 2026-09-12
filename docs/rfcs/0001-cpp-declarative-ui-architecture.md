@@ -398,6 +398,27 @@ zero, empty lists, overscroll, and unchanged eager-list behavior. This is a
 bounded viewport cache rather than an indefinite keep-alive bucket; policy-based
 retention outside the cache window remains a separate future extension.
 
+The policy keep-alive slice adds `keep_alive_when(predicate)` to an immutable
+owning lazy source. Source construction materializes and validates keys before
+the predicate is evaluated into a retained-key snapshot; both steps finish
+before the source can be passed to retained-tree reconciliation.
+Only an item that has already been realized may enter the keep-alive bucket.
+When it leaves the cache range and its current model item satisfies the policy,
+its keyed Element subtree remains mounted in BuildOwner but is detached from
+the Sliver's active child sequence. Dormant subtrees preserve state, resources,
+dependencies, and focus identity, while render-tree synchronization, lazy range
+discovery, layout, paint, and hit testing must not traverse them. If the key
+re-enters the cache range with the same child type, normal reconciliation moves
+the exact Element and RenderObject subtree back to the active sequence before
+paint. A key removed from the model, rejected by a changed policy, or replaced
+through a different lazy source type must be synchronously unmounted, including
+resource cancellation and stale StateHandle invalidation. The default policy
+retains nothing, preserving the bounded-cache behavior. Acceptance covers state
+and RenderObject identity through eviction/restoration, dormant paint and hit
+test exclusion, policy cancellation, model deletion, never-realized items,
+owner destruction, duplicate-key transactionality, and no behavior change for
+ordinary eager `ForEach`.
+
 Raster submission uses one owned Renderer on one worker thread and queues only
 immutable LayerTree snapshots. Submission is thread-safe and FIFO. Stop is
 non-blocking, rejects future submissions, cancels queued frames, and permits the

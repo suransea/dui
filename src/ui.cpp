@@ -121,6 +121,9 @@ void BuildOwner::unmount(std::unique_ptr<Element>& element) {
   for (auto& child : element->children_) {
     unmount(child);
   }
+  for (auto& child : element->lazy_kept_alive_children_) {
+    unmount(child);
+  }
   clear_dependencies(*element);
   dirty_.erase(element->id_);
   registry_.erase(element->id_);

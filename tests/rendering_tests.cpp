@@ -9,6 +9,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -217,6 +218,52 @@ struct SliverComponent {
 
 struct BoxComponent {
   auto build(dui::BuildContext&) const { return dui::Fragment{dui::Text{"component"}}; }
+};
+
+struct KeepAliveResource {
+  int* destructions;
+  bool active{true};
+
+  KeepAliveResource(int& constructions, int& destroyed) : destructions(&destroyed) {
+    ++constructions;
+  }
+  KeepAliveResource(const KeepAliveResource&) = delete;
+  KeepAliveResource& operator=(const KeepAliveResource&) = delete;
+  KeepAliveResource(KeepAliveResource&& other) noexcept
+    : destructions(other.destructions), active(std::exchange(other.active, false)) {}
+  ~KeepAliveResource() {
+    if (active) {
+      ++*destructions;
+    }
+  }
+};
+
+struct KeepAliveStateItem {
+  int id;
+  std::vector<std::optional<dui::StateHandle<int>>>* handles;
+  std::vector<const KeepAliveResource*>* resources;
+  int* resource_constructions;
+  int* resource_destructions;
+  dui::Signal<int>* signal;
+  int* key_events;
+
+  auto build(dui::BuildContext& context) const {
+    auto state = context.state<"keep-alive-value">(id * 10);
+    handles->at(static_cast<std::size_t>(id)) = state;
+    auto& resource = context.resource<"keep-alive-resource">([&] {
+      return KeepAliveResource{*resource_constructions, *resource_destructions};
+    });
+    resources->at(static_cast<std::size_t>(id)) = &resource;
+    const int observed = id == 1 ? signal->get() : 0;
+    return dui::focusable(
+      dui::Text{"keep-alive " + std::to_string(id) + ":" + std::to_string(state.get()) + ":" +
+                std::to_string(observed)},
+      [events = key_events](const dui::KeyEvent&) {
+        ++*events;
+        return dui::KeyEventResult::handled;
+      },
+      id == 1);
+  }
 };
 
 static_assert(dui::detail::has_sliver_protocol<SliverComponent>());
@@ -1149,6 +1196,292 @@ void lazy_fixed_extent_cache_retains_bounded_keyed_range() {
           "fractional cache boundaries mounted or painted the wrong items");
 }
 
+void lazy_keep_alive_preserves_state_outside_the_cache_range() {
+  struct Item {
+    int id;
+  };
+
+  std::vector<Item> items{{0}, {1}, {2}, {3}, {4}};
+  std::vector<std::optional<dui::StateHandle<int>>> handles(items.size());
+  std::vector<const KeepAliveResource*> resources(items.size());
+  int resource_constructions = 0;
+  int resource_destructions = 0;
+  dui::Signal<int> keep_alive_signal{0};
+  int key_events = 0;
+  bool keep_enabled = true;
+  int policy_calls = 0;
+  int builder_calls = 0;
+  auto builder = [&](const Item& item) {
+    ++builder_calls;
+    return KeepAliveStateItem{item.id,
+                              &handles,
+                              &resources,
+                              &resource_constructions,
+                              &resource_destructions,
+                              &keep_alive_signal,
+                              &key_events};
+  };
+  auto policy = [&](const Item& item) {
+    ++policy_calls;
+    return keep_enabled && (item.id == 1 || item.id == 3);
+  };
+  const auto make_view = [&](const std::vector<Item>& values, double offset) {
+    auto source = dui::lazy_for_each(values, dui::key<&Item::id>, builder).keep_alive_when(policy);
+    return dui::Viewport{
+      offset, dui::SliverFixedExtentList{16.0, dui::cache_extent(0.0), std::move(source)}};
+  };
+
+  dui::BuildOwner owner;
+  owner.render(make_view(items, 16.0));
+  require(policy_calls == 5 && builder_calls == 0,
+          "keep-alive policy or item builder ran in the wrong model phase");
+  const auto first = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  auto* list_element = owner.root()->children().front().get();
+  auto* viewport = dynamic_cast<dui::RenderViewport*>(owner.root()->render_object());
+  auto* list = dynamic_cast<dui::RenderSliverFixedExtentList*>(viewport->children().front());
+  auto* item_element = list_element->children().front().get();
+  const auto retained_id = item_element->id();
+  auto* retained_render = item_element->children().front()->render_object();
+  auto* retained_hit_render = item_element->children().front()->children().front()->render_object();
+  const auto* retained_resource = resources[1];
+  const auto focused_id = owner.focused_node()->id();
+  require(first.dump().contains("keep-alive 1:10") && handles[1].has_value() &&
+            resource_constructions == 1 && resource_destructions == 0,
+          "initial keep-alive item did not mount with state");
+
+  handles[1]->set(41);
+  const auto updated = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  require(updated.dump().contains("keep-alive 1:41"),
+          "active keep-alive item did not rebuild its state");
+
+  const auto unmounts_before_keep = owner.unmount_count();
+  owner.render(make_view(items, 32.0));
+  const auto second = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  require(list_element->kept_alive_child_count() == 1 && list_element->children().size() == 1 &&
+            list_element->children().front()->key() == dui::Key{std::int64_t{2}} &&
+            list->children().size() == 1 && owner.unmount_count() == unmounts_before_keep,
+          "policy-selected item was unmounted or attached to the active RenderSliver");
+  require(resource_constructions == 2 && resource_destructions == 0,
+          "dormant keep-alive resource was reconstructed or destroyed");
+  require(!second.dump().contains("keep-alive 1"),
+          "dormant keep-alive item leaked into paint output");
+  require(list_element->kept_alive_child_count() == 1 && builder_calls == 2 &&
+            !handles[3].has_value(),
+          "never-realized policy-selected item entered the keep-alive bucket");
+
+  handles[1]->set(42);
+  keep_alive_signal.set(7);
+  require(owner.pending_build_count() == 1,
+          "dormant keep-alive dependency did not receive invalidation");
+  const auto dormant_update = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  require(handles[1]->get() == 42 && !dormant_update.dump().contains("keep-alive 1"),
+          "dormant state was discarded or painted while detached");
+  require(owner.focused_node() != nullptr && owner.focused_node()->id() == focused_id &&
+            owner.dispatch_key({"A", dui::KeyPhase::down}) == dui::KeyEventResult::handled &&
+            key_events == 1,
+          "dormant keep-alive item lost focused key dispatch");
+
+  std::vector<Item> duplicate = items;
+  duplicate.back().id = 3;
+  const auto calls_before_duplicate = policy_calls;
+  const auto root_updates_before_invalid = owner.root()->update_count();
+  bool duplicate_rejected = false;
+  try {
+    owner.render(make_view(duplicate, 0.0));
+  } catch (const std::logic_error&) {
+    duplicate_rejected = true;
+  }
+  require(duplicate_rejected && policy_calls == calls_before_duplicate &&
+            list_element->kept_alive_child_count() == 1 && viewport->scroll_offset() == 32.0 &&
+            owner.root()->update_count() == root_updates_before_invalid,
+          "duplicate keys invoked keep-alive policy or mutated dormant Elements");
+
+  const auto different_builder = [](const Item& item) {
+    return dui::Text{"invalid " + std::to_string(item.id)};
+  };
+  bool different_source_rejected = false;
+  try {
+    auto source = dui::lazy_for_each(duplicate, dui::key<&Item::id>, different_builder)
+                    .keep_alive_when([](const Item&) { return true; });
+    owner.render(dui::Viewport{0.0, dui::SliverFixedExtentList{16.0, std::move(source)}});
+  } catch (const std::logic_error&) {
+    different_source_rejected = true;
+  }
+  require(different_source_rejected &&
+            owner.root()->update_count() == root_updates_before_invalid &&
+            list_element->kept_alive_child_count() == 1,
+          "invalid different-type lazy source replaced the retained tree");
+
+  bool throwing_policy_rejected = false;
+  try {
+    auto source =
+      dui::lazy_for_each(items, dui::key<&Item::id>, different_builder)
+        .keep_alive_when([](const Item&) -> bool { throw std::runtime_error("policy failed"); });
+    owner.render(dui::Viewport{0.0, dui::SliverFixedExtentList{16.0, std::move(source)}});
+  } catch (const std::runtime_error&) {
+    throwing_policy_rejected = true;
+  }
+  require(throwing_policy_rejected && owner.root()->update_count() == root_updates_before_invalid &&
+            list_element->kept_alive_child_count() == 1,
+          "throwing keep-alive policy mutated the retained tree");
+
+  owner.render(make_view(items, 16.0));
+  const auto restored = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  item_element = list_element->children().front().get();
+  require(item_element->id() == retained_id &&
+            item_element->children().front()->render_object() == retained_render &&
+            resources[1] == retained_resource && restored.dump().contains("keep-alive 1:42:7") &&
+            list_element->kept_alive_child_count() == 0 && owner.focused_node() != nullptr &&
+            owner.focused_node()->id() == focused_id,
+          "restored keep-alive item lost Element, RenderObject, or state identity");
+  require(owner.hit_test({1.0, 1.0}) == retained_hit_render,
+          "restored keep-alive item did not rejoin hit testing");
+
+  owner.render(make_view(items, 32.0));
+  [[maybe_unused]] const auto kept_again = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  require(list_element->kept_alive_child_count() == 1,
+          "restored item did not return to the keep-alive bucket");
+  const auto destructions_before_policy_cancel = resource_destructions;
+  keep_enabled = false;
+  owner.render(make_view(items, 32.0));
+  bool cancelled_handle_rejected = false;
+  try {
+    static_cast<void>(handles[1]->get());
+  } catch (const std::logic_error&) {
+    cancelled_handle_rejected = true;
+  }
+  require(cancelled_handle_rejected && list_element->kept_alive_child_count() == 0 &&
+            resource_destructions == destructions_before_policy_cancel + 1 &&
+            owner.focused_node() == nullptr,
+          "policy cancellation did not immediately unmount dormant state and resources");
+  keep_alive_signal.set(8);
+  require(owner.pending_build_count() == 0,
+          "purged dormant keep-alive item remained subscribed to its dependency");
+  [[maybe_unused]] const auto policy_cancelled =
+    owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+
+  keep_enabled = true;
+  owner.render(make_view(items, 16.0));
+  [[maybe_unused]] const auto recreated = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  const auto recreated_id = list_element->children().front()->id();
+  owner.render(make_view(items, 32.0));
+  [[maybe_unused]] const auto retained_for_deletion =
+    owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  auto deleted_handle = *handles[1];
+  const auto destructions_before_deletion = resource_destructions;
+  std::erase_if(items, [](const Item& item) { return item.id == 1; });
+  owner.render(make_view(items, 16.0));
+  bool deleted_handle_rejected = false;
+  try {
+    static_cast<void>(deleted_handle.get());
+  } catch (const std::logic_error&) {
+    deleted_handle_rejected = true;
+  }
+  require(deleted_handle_rejected && list_element->kept_alive_child_count() == 0 &&
+            resource_destructions == destructions_before_deletion + 1,
+          "model deletion did not immediately unmount dormant state and resources");
+  [[maybe_unused]] const auto deleted = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  require(list_element->children().front()->id() != recreated_id,
+          "model deletion restored a stale keep-alive Element");
+
+  std::optional<dui::StateHandle<int>> destruction_handle;
+  int owner_resource_constructions = 0;
+  int owner_resource_destructions = 0;
+  {
+    std::vector<Item> destruction_items{{0}, {1}, {2}};
+    std::vector<std::optional<dui::StateHandle<int>>> destruction_handles(destruction_items.size());
+    std::vector<const KeepAliveResource*> destruction_resources(destruction_items.size());
+    int destruction_key_events = 0;
+    dui::Signal<int> destruction_signal{0};
+    auto destruction_builder = [&](const Item& item) {
+      return KeepAliveStateItem{item.id,
+                                &destruction_handles,
+                                &destruction_resources,
+                                &owner_resource_constructions,
+                                &owner_resource_destructions,
+                                &destruction_signal,
+                                &destruction_key_events};
+    };
+    auto destruction_policy = [](const Item& item) { return item.id == 1; };
+    const auto destruction_view = [&](double offset) {
+      auto source = dui::lazy_for_each(destruction_items, dui::key<&Item::id>, destruction_builder)
+                      .keep_alive_when(destruction_policy);
+      return dui::Viewport{offset, dui::SliverFixedExtentList{16.0, std::move(source)}};
+    };
+    dui::BuildOwner destruction_owner;
+    destruction_owner.render(destruction_view(16.0));
+    [[maybe_unused]] const auto destruction_active =
+      destruction_owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+    destruction_handle = destruction_handles[1];
+    destruction_owner.render(destruction_view(32.0));
+    [[maybe_unused]] const auto destruction_dormant =
+      destruction_owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+    require(destruction_owner.root()->children().front()->kept_alive_child_count() == 1,
+            "owner destruction test did not create a dormant Element");
+  }
+  bool destruction_handle_rejected = false;
+  try {
+    static_cast<void>(destruction_handle->get());
+  } catch (const std::logic_error&) {
+    destruction_handle_rejected = true;
+  }
+  require(destruction_handle_rejected && owner_resource_constructions == 2 &&
+            owner_resource_destructions == 2,
+          "BuildOwner destruction did not unmount dormant state and resources");
+}
+
+void lazy_keep_alive_builder_failure_preserves_retry_state() {
+  struct Item {
+    int id;
+  };
+  const std::vector<Item> items{{0}, {1}, {2}};
+  bool fail = false;
+  auto builder = [&](const Item& item) {
+    if (fail && item.id == 2) {
+      throw std::runtime_error("lazy builder failed");
+    }
+    return dui::Text{"retry " + std::to_string(item.id)};
+  };
+  const auto make_view = [&](double offset) {
+    auto source =
+      dui::lazy_for_each(items, dui::key<&Item::id>, builder).keep_alive_when([](const Item& item) {
+        return item.id == 1;
+      });
+    return dui::Viewport{offset, dui::SliverFixedExtentList{16.0, std::move(source)}};
+  };
+
+  dui::BuildOwner owner;
+  owner.render(make_view(16.0));
+  [[maybe_unused]] const auto initial = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  auto* list_element = owner.root()->children().front().get();
+  const auto retained_id = list_element->children().front()->id();
+  auto* retained_render = list_element->children().front()->render_object();
+
+  fail = true;
+  owner.render(make_view(32.0));
+  bool failed = false;
+  try {
+    static_cast<void>(owner.frame(dui::BoxConstraints::tight({100.0, 16.0})));
+  } catch (const std::runtime_error&) {
+    failed = true;
+  }
+  require(failed && list_element->children().front()->id() == retained_id &&
+            list_element->children().front()->render_object() == retained_render &&
+            list_element->kept_alive_child_count() == 0,
+          "lazy builder failure mutated active or dormant ownership");
+
+  fail = false;
+  owner.render(make_view(32.0));
+  const auto retried = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  require(retried.dump().contains("retry 2") && list_element->kept_alive_child_count() == 1,
+          "lazy builder failure did not recover on a valid retry");
+  owner.render(make_view(16.0));
+  [[maybe_unused]] const auto restored = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  require(list_element->children().front()->id() == retained_id &&
+            list_element->children().front()->render_object() == retained_render,
+          "retry did not preserve the previously active keep-alive identity");
+}
+
 void nested_boundary_recomposes_without_repainting_outer_content() {
   dui::BuildOwner owner;
   const auto make_view = [](std::uint32_t color) {
@@ -1369,6 +1702,8 @@ int main() {
     lazy_fixed_extent_list_builds_only_visible_keyed_elements();
     lazy_source_owns_temporary_data_and_preserves_eager_foreach();
     lazy_fixed_extent_cache_retains_bounded_keyed_range();
+    lazy_keep_alive_preserves_state_outside_the_cache_range();
+    lazy_keep_alive_builder_failure_preserves_retry_state();
     nested_boundary_recomposes_without_repainting_outer_content();
     stack_hit_test_uses_reverse_paint_order_and_records_path();
     color_update_repaints_without_layout();
