@@ -19,14 +19,16 @@ terminal failure.
 
 A vertical `Viewport` is the explicit box-to-Sliver boundary. It accepts
 `SliverToBoxAdapter` children, computes scroll and paint geometry, clips retained
-output, and preserves hit-test coordinates while scrolling. Lazy list child
-creation remains a later virtualization slice. `SliverFixedExtentList` uses
+output, and preserves hit-test coordinates while scrolling.
+`SliverFixedExtentList` uses
 constant-time visible-index calculation and limits layout, paint traversal, and
 render-tree hit testing to the visible range. Its current declarative children
 can use `lazy_for_each` to snapshot model data while constructing, reconciling,
-and synchronizing only the visible keyed Elements. Ordinary `ForEach` remains
-the explicit eager path. Extra cache extent and offscreen keep-alive policy are
-still in progress.
+and synchronizing only the visible/cache keyed Elements. An explicit
+`cache_extent(...)` argument retains items intersecting that many logical pixels
+before and after the viewport while keeping them out of layout, paint, and hit
+testing until visible. Ordinary `ForEach` remains the explicit eager path;
+policy-based retention beyond the bounded cache remains future work.
 
 ```cpp
 struct Counter {

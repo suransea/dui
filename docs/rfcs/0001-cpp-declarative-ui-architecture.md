@@ -382,6 +382,22 @@ offscreen duplicate-key rejection before any item builder invocation. This
 slice uses zero extra cache; configurable cache extent and keep-alive lifecycle
 remain required before declaring cached virtual scrolling complete.
 
+The cache-range slice adds an explicit `cache_extent` option to
+`SliverFixedExtentList`. It is a finite, non-negative count of logical pixels
+applied symmetrically before and after the visible scroll interval, clamped to
+the list's scroll extent. The requested half-open child range contains every
+item whose interval intersects that cache window; the default remains zero.
+Cached Elements and RenderObjects stay mounted and retain keyed identity, but
+only the visible subrange may be laid out, painted, or hit tested. Scrolling or
+changing the cache extent must reconcile the entire requested range before the
+frame's only paint and synchronously unmount every item outside it. Invalid
+cache extents must fail before mutating the retained tree. Acceptance covers
+leading and trailing clamping, exact item boundaries, cached-item promotion to
+visible without a new mount, symmetric one-item range shifts, cache shrink to
+zero, empty lists, overscroll, and unchanged eager-list behavior. This is a
+bounded viewport cache rather than an indefinite keep-alive bucket; policy-based
+retention outside the cache window remains a separate future extension.
+
 Raster submission uses one owned Renderer on one worker thread and queues only
 immutable LayerTree snapshots. Submission is thread-safe and FIFO. Stop is
 non-blocking, rejects future submissions, cancels queued frames, and permits the

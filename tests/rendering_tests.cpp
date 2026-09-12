@@ -958,13 +958,195 @@ void lazy_source_owns_temporary_data_and_preserves_eager_foreach() {
   };
   const std::vector<Item> eager_items{{1}, {2}, {3}};
   dui::BuildOwner eager_owner;
-  eager_owner.render(
-    dui::Viewport{0.0, dui::SliverFixedExtentList{
-                         16.0, dui::ForEach{eager_items, dui::key<&Item::id>, eager_builder}}});
+  eager_owner.render(dui::Viewport{
+    0.0,
+    dui::SliverFixedExtentList{16.0, dui::cache_extent(32.0),
+                               dui::ForEach{eager_items, dui::key<&Item::id>, eager_builder}}});
   require(eager_builds == 3, "ordinary ForEach no longer preserved eager behavior");
   const auto eager_frame = eager_owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
   require(eager_frame.dump().contains("eager 1") && eager_frame.dump().contains("eager 2"),
           "eager ForEach compatibility path produced incorrect output");
+}
+
+void lazy_fixed_extent_cache_retains_bounded_keyed_range() {
+  struct Item {
+    int id;
+  };
+
+  std::vector<Item> items;
+  for (int id = 0; id < 100; ++id) {
+    items.push_back({id});
+  }
+  int builder_calls = 0;
+  auto builder = [&](const Item& item) {
+    ++builder_calls;
+    return dui::Text{"cached " + std::to_string(item.id)};
+  };
+  const auto make_view = [&](const std::vector<Item>& values, double offset, double cache) {
+    return dui::Viewport{
+      offset, dui::SliverFixedExtentList{16.0, dui::cache_extent(cache),
+                                         dui::lazy_for_each(values, dui::key<&Item::id>, builder)}};
+  };
+
+  dui::BuildOwner owner;
+  owner.render(make_view(items, 160.0, 16.0));
+  const auto first = owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+  auto* list_element = owner.root()->children().front().get();
+  auto* viewport = dynamic_cast<dui::RenderViewport*>(owner.root()->render_object());
+  auto* list = dynamic_cast<dui::RenderSliverFixedExtentList*>(viewport->children().front());
+  require(list->cache_extent() == 16.0 && list->first_mounted_index() == 9,
+          "lazy Sliver lost its configured cache extent or leading cached index");
+  require(builder_calls == 4 && list_element->children().size() == 4,
+          "lazy Sliver did not mount the exact cache range");
+  require(list_element->children()[0]->key() == dui::Key{std::int64_t{9}} &&
+            list_element->children()[3]->key() == dui::Key{std::int64_t{12}},
+          "lazy Sliver mounted incorrect exact-boundary cache items");
+  require(first.dump().contains("cached 10") && first.dump().contains("cached 11") &&
+            !first.dump().contains("cached 9") && !first.dump().contains("cached 12"),
+          "cached but invisible items leaked into paint output");
+  require(list->children()[0]->layout_count() == 0 && list->children()[0]->paint_count() == 0 &&
+            list->children()[3]->layout_count() == 0 && list->children()[3]->paint_count() == 0,
+          "cached but invisible items were laid out or painted");
+
+  const auto promoted_id = list_element->children()[3]->id();
+  auto* promoted_render = list_element->children()[3]->render_object();
+  const auto mounts = owner.mount_count();
+  const auto unmounts = owner.unmount_count();
+  owner.render(make_view(items, 176.0, 16.0));
+  const auto second = owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+  require(list_element->children().front()->key() == dui::Key{std::int64_t{10}} &&
+            list_element->children().back()->key() == dui::Key{std::int64_t{13}},
+          "one-item scroll did not shift the cache range symmetrically");
+  require(list_element->children()[2]->key() == dui::Key{std::int64_t{12}} &&
+            list_element->children()[2]->id() == promoted_id &&
+            list_element->children()[2]->render_object() == promoted_render,
+          "cached item did not retain keyed identity when promoted to visible");
+  require(owner.mount_count() == mounts + 1 && owner.unmount_count() == unmounts + 1,
+          "one-item cache shift did not mount and evict exactly one Element");
+  require(second.dump().contains("cached 11") && second.dump().contains("cached 12") &&
+            !second.dump().contains("cached 10") && !second.dump().contains("cached 13"),
+          "shifted cache range changed the visible paint range");
+  require(owner.hit_test({1.0, 17.0}) == promoted_render,
+          "promoted cached item did not participate in visible hit testing");
+
+  const auto shrink_mounts = owner.mount_count();
+  const auto shrink_unmounts = owner.unmount_count();
+  owner.render(make_view(items, 176.0, 0.0));
+  [[maybe_unused]] const auto shrunk = owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+  require(list_element->children().size() == 2 && list->first_mounted_index() == 11 &&
+            list_element->children()[1]->id() == promoted_id,
+          "shrinking cache to zero did not preserve the visible keyed range");
+  require(owner.mount_count() == shrink_mounts && owner.unmount_count() == shrink_unmounts + 2,
+          "shrinking cache to zero did not evict exactly the cached Elements");
+
+  const auto stable_first_id = list_element->children()[0]->id();
+  const auto root_updates = owner.root()->update_count();
+  const auto list_updates = list_element->update_count();
+  for (const double invalid_cache : std::array{-1.0, std::numeric_limits<double>::infinity(),
+                                               std::numeric_limits<double>::quiet_NaN()}) {
+    bool invalid_rejected = false;
+    try {
+      owner.render(make_view(items, 0.0, invalid_cache));
+    } catch (const std::invalid_argument&) {
+      invalid_rejected = true;
+    }
+    require(invalid_rejected && viewport->scroll_offset() == 176.0 && list->cache_extent() == 0.0 &&
+              list_element->children()[0]->id() == stable_first_id &&
+              owner.root()->update_count() == root_updates &&
+              list_element->update_count() == list_updates,
+            "invalid cache extent mutated the retained lazy tree");
+  }
+  bool direct_invalid_rejected = false;
+  try {
+    list->set_cache_extent(std::numeric_limits<double>::infinity());
+  } catch (const std::invalid_argument&) {
+    direct_invalid_rejected = true;
+  }
+  require(direct_invalid_rejected && list->cache_extent() == 0.0,
+          "RenderSliver accepted or committed an invalid cache extent");
+
+  dui::BuildOwner empty_owner;
+  bool empty_invalid_rejected = false;
+  try {
+    empty_owner.render(make_view(items, 0.0, -1.0));
+  } catch (const std::invalid_argument&) {
+    empty_invalid_rejected = true;
+  }
+  require(empty_invalid_rejected && empty_owner.root() == nullptr,
+          "invalid initial cache extent left a partial Element tree");
+
+  std::vector<Item> short_items{{0}, {1}, {2}, {3}, {4}};
+  owner.render(make_view(short_items, 0.0, 16.0));
+  [[maybe_unused]] const auto leading = owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+  require(list_element->children().size() == 3 &&
+            list_element->children().front()->key() == dui::Key{std::int64_t{0}} &&
+            list_element->children().back()->key() == dui::Key{std::int64_t{2}},
+          "leading cache range was not clamped to the list start");
+
+  owner.render(make_view(short_items, 48.0, 16.0));
+  [[maybe_unused]] const auto trailing = owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+  require(list_element->children().size() == 3 && list->first_mounted_index() == 2 &&
+            list_element->children().back()->key() == dui::Key{std::int64_t{4}},
+          "trailing cache range was not clamped to the list end");
+
+  owner.render(make_view(short_items, 88.0, 16.0));
+  const auto near_overscroll = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  require(list_element->children().size() == 1 && list->first_mounted_index() == 4 &&
+            list_element->children().front()->key() == dui::Key{std::int64_t{4}} &&
+            near_overscroll.dump().find("cached") == std::string::npos,
+          "near overscroll did not retain only the intersecting leading cache item");
+
+  const auto overscroll_unmounts = owner.unmount_count();
+  owner.render(make_view(short_items, 200.0, 16.0));
+  const auto overscrolled = owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+  require(list_element->children().empty() &&
+            overscrolled.dump().find("cached") == std::string::npos,
+          "far overscroll retained or painted an out-of-range cached item");
+  require(owner.unmount_count() == overscroll_unmounts + 1,
+          "far overscroll did not dispose the previous bounded cache range");
+
+  owner.render(make_view({}, 0.0, 16.0));
+  [[maybe_unused]] const auto empty = owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+  require(list->logical_child_count() == 0 && list_element->children().empty(),
+          "empty lazy model produced a non-empty cache range");
+
+  std::vector<Item> large_items{{0}, {1}};
+  dui::BuildOwner precise_owner;
+  precise_owner.render(dui::Viewport{
+    1.0e18,
+    dui::SliverFixedExtentList{1.0e18, dui::cache_extent(0.0),
+                               dui::lazy_for_each(large_items, dui::key<&Item::id>, builder)}});
+  const auto precise = precise_owner.frame(dui::BoxConstraints::tight({100.0, 1.0}));
+  auto* precise_list_element = precise_owner.root()->children().front().get();
+  require(precise_list_element->children().size() == 1 &&
+            precise_list_element->children().front()->key() == dui::Key{std::int64_t{1}} &&
+            precise.dump().contains("cached 1"),
+          "large-coordinate cache arithmetic lost the visible item");
+
+  const double huge_extent = std::numeric_limits<double>::max() / 8.0;
+  std::vector<Item> huge_items{{0}, {1}, {2}, {3}, {4}, {5}, {6}, {7}};
+  dui::BuildOwner overflow_owner;
+  overflow_owner.render(dui::Viewport{
+    huge_extent * 6.0,
+    dui::SliverFixedExtentList{huge_extent, dui::cache_extent(huge_extent * 2.5),
+                               dui::lazy_for_each(huge_items, dui::key<&Item::id>, builder)}});
+  [[maybe_unused]] const auto overflow_safe =
+    overflow_owner.frame(dui::BoxConstraints::tight({100.0, huge_extent / 2.0}));
+  auto* overflow_list_element = overflow_owner.root()->children().front().get();
+  require(overflow_list_element->children().size() == 5 &&
+            overflow_list_element->children().front()->key() == dui::Key{std::int64_t{3}} &&
+            overflow_list_element->children().back()->key() == dui::Key{std::int64_t{7}},
+          "cache range overflow did not clamp to the logical list end");
+
+  dui::BuildOwner fractional_owner;
+  fractional_owner.render(make_view(items, 160.5, 0.75));
+  const auto fractional = fractional_owner.frame(dui::BoxConstraints::tight({100.0, 31.0}));
+  auto* fractional_list = fractional_owner.root()->children().front().get();
+  require(fractional_list->children().size() == 4 &&
+            fractional_list->children().front()->key() == dui::Key{std::int64_t{9}} &&
+            fractional_list->children().back()->key() == dui::Key{std::int64_t{12}} &&
+            !fractional.dump().contains("cached 9") && !fractional.dump().contains("cached 12"),
+          "fractional cache boundaries mounted or painted the wrong items");
 }
 
 void nested_boundary_recomposes_without_repainting_outer_content() {
@@ -1186,6 +1368,7 @@ int main() {
     dirty_fixed_extent_sliver_rejects_stale_hit_range();
     lazy_fixed_extent_list_builds_only_visible_keyed_elements();
     lazy_source_owns_temporary_data_and_preserves_eager_foreach();
+    lazy_fixed_extent_cache_retains_bounded_keyed_range();
     nested_boundary_recomposes_without_repainting_outer_content();
     stack_hit_test_uses_reverse_paint_order_and_records_path();
     color_update_repaints_without_layout();

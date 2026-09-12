@@ -248,6 +248,7 @@ private:
   [[nodiscard]] Element* resolve(Element::Id id, std::uint64_t generation) const;
   void clear_dependencies(Element& element);
   void synchronize_render_tree();
+  [[nodiscard]] bool has_pending_lazy_children() const;
   [[nodiscard]] bool realize_lazy_children();
   void forget_dependency(Element::Id id, std::uint64_t generation, DependencySource& dependency);
 

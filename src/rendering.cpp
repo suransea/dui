@@ -605,6 +605,12 @@ void validate_item_extent(double item_extent) {
   }
 }
 
+void validate_cache_extent(double cache_extent) {
+  if (!std::isfinite(cache_extent) || cache_extent < 0.0) {
+    throw std::invalid_argument("Sliver cache extent must be finite and non-negative");
+  }
+}
+
 std::size_t first_item_at(double offset, double item_extent, std::size_t child_count,
                           double scroll_extent) {
   if (child_count == 0 || offset >= scroll_extent) {
@@ -625,7 +631,7 @@ std::size_t first_item_at(double offset, double item_extent, std::size_t child_c
 }
 
 std::size_t first_item_starting_at_or_after_viewport_position(double scroll_offset,
-                                                              double viewport_position,
+                                                              long double viewport_position,
                                                               double item_extent,
                                                               std::size_t child_count) {
   std::size_t first = 0;
@@ -634,13 +640,40 @@ std::size_t first_item_starting_at_or_after_viewport_position(double scroll_offs
     const std::size_t middle = first + (last - first) / 2;
     const double item_start = static_cast<double>(middle) * item_extent;
     const long double relative_start = static_cast<long double>(item_start) - scroll_offset;
-    if (relative_start < static_cast<long double>(viewport_position)) {
+    if (relative_start < viewport_position) {
       first = middle + 1;
     } else {
       last = middle;
     }
   }
   return first;
+}
+
+std::size_t first_item_intersecting_leading_cache(double scroll_offset, double cache_extent,
+                                                  double item_extent, std::size_t child_count,
+                                                  double scroll_extent) {
+  if (child_count == 0 || static_cast<long double>(scroll_offset) - scroll_extent >=
+                            static_cast<long double>(cache_extent)) {
+    return child_count;
+  }
+  if (scroll_offset <= cache_extent) {
+    return 0;
+  }
+
+  const long double leading_position = -static_cast<long double>(cache_extent);
+  std::size_t first = 0;
+  std::size_t last = child_count;
+  while (first < last) {
+    const std::size_t middle = first + (last - first) / 2;
+    const double item_start = static_cast<double>(middle) * item_extent;
+    const long double relative_start = static_cast<long double>(item_start) - scroll_offset;
+    if (relative_start <= leading_position) {
+      first = middle + 1;
+    } else {
+      last = middle;
+    }
+  }
+  return first == 0 ? 0 : first - 1;
 }
 
 std::size_t item_at_viewport_position(double scroll_offset, double viewport_position,
@@ -673,6 +706,15 @@ void RenderSliverFixedExtentList::set_item_extent(double item_extent) {
     return;
   }
   item_extent_ = item_extent;
+  mark_needs_layout();
+}
+
+void RenderSliverFixedExtentList::set_cache_extent(double cache_extent) {
+  validate_cache_extent(cache_extent);
+  if (cache_extent_ == cache_extent) {
+    return;
+  }
+  cache_extent_ = cache_extent;
   mark_needs_layout();
 }
 
@@ -736,12 +778,17 @@ void RenderSliverFixedExtentList::perform_layout() {
     visible_child_count_ = trailing_index - first_visible_index_;
   }
 
-  const std::size_t visible_end = first_visible_index_ + visible_child_count_;
+  const std::size_t first_cached_index = first_item_intersecting_leading_cache(
+    constraints().scroll_offset(), cache_extent_, item_extent_, logical_count, scroll_extent);
+  const long double trailing_cache_position =
+    static_cast<long double>(constraints().remaining_paint_extent()) + cache_extent_;
+  const std::size_t cached_end = first_item_starting_at_or_after_viewport_position(
+    constraints().scroll_offset(), trailing_cache_position, item_extent_, logical_count);
   if (lazy_ &&
-      (mounted_revision_ != model_revision_ || first_visible_index_ < first_mounted_index_ ||
-       visible_end > first_mounted_index_ + mounted_child_count_ ||
+      (mounted_revision_ != model_revision_ || first_mounted_index_ != first_cached_index ||
+       mounted_child_count_ != cached_end - first_cached_index ||
        mounted_child_count_ != children().size())) {
-    requested_child_range_ = ChildRange{first_visible_index_, visible_end, model_revision_};
+    requested_child_range_ = ChildRange{first_cached_index, cached_end, model_revision_};
     first_visible_child_ = 0;
     visible_child_count_ = 0;
     set_geometry({scroll_extent, visible_extent, scroll_extent, 0.0,

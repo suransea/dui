@@ -194,8 +194,19 @@ deep initial scroll, visible-only builder and Element counts, logical-to-mounted
 index mapping, overlapping keyed identity, exact eviction counts, duplicate
 keys outside the visible range, temporary initializer-list ownership, probe
 passes without intermediate paint, and unchanged eager `ForEach` behavior.
-The requested range currently equals the visible range. Configurable cache
-extent and retained offscreen Element lifecycle remain outstanding.
+
+The cache-range slice adds a finite non-negative `cache_extent(...)` option with
+a zero default. Relative range arithmetic avoids overflowing absolute scroll
+positions or losing a small viewport at large coordinates. Cached keyed
+Elements and RenderObjects remain mounted on both sides of the viewport while
+layout, paint, and hit testing continue to use only the visible subrange.
+Scrolling reconciles overlap before paint and immediately disposes Elements
+outside the new bounded range. Tests cover exact boundaries, leading/trailing
+clamping, cached-to-visible identity and hit testing, one-item shifts, shrink to
+zero, invalid input transactionality, empty and overscrolled models, and
+large-coordinate/overflow behavior. Stabilization counts productive realization
+rounds separately from the final layout probe; a dedicated test accepts the
+sixteenth round and rejects a seventeenth deterministically.
 
 ## Verification
 
@@ -220,8 +231,8 @@ The prototype has been built and tested with:
 - The initial Sliver implementation lays out static Slivers eagerly and supports
   only a vertical axis. Fixed-extent lists virtualize layout, paint traversal,
   and hit testing; `lazy_for_each` additionally virtualizes visible Element
-  construction and synchronization. A cache-range keep-alive lifecycle is still
-  required for cached virtualized scrolling.
+  construction and synchronization with a bounded cache range. Policy-based
+  keep-alive outside that range is not implemented.
 - `DisplayListRenderer` consumes LayerTree on the raster worker but still
   flattens it to the headless DisplayList representation; a GPU layer consumer
   is not implemented yet.
@@ -238,4 +249,4 @@ The prototype has been built and tested with:
 
 Run the Win32 text-input suite against a real message-pumped HWND and native
 IMEs to finish M2 verification. M3 continues with a production GPU layer
-consumer, lazy Sliver list virtualization, and semantics.
+consumer, policy-based Sliver keep-alive, and semantics.

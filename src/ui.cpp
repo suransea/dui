@@ -211,6 +211,25 @@ void BuildOwner::synchronize_render_tree() {
   render_owner_.set_roots(roots);
 }
 
+bool BuildOwner::has_pending_lazy_children() const {
+  const auto visit = [&](auto&& self, const Element& element) -> bool {
+    if (element.lazy_range_realizer_ != nullptr) {
+      const auto* render =
+        dynamic_cast<const RenderSliverFixedExtentList*>(element.render_object_.get());
+      if (render == nullptr) {
+        throw std::logic_error("Lazy child manager requires RenderSliverFixedExtentList");
+      }
+      const auto request = render->requested_child_range();
+      if (request.has_value() && request->revision == element.lazy_revision_) {
+        return true;
+      }
+    }
+    return std::ranges::any_of(
+      element.children_, [&](const auto& child) { return child != nullptr && self(self, *child); });
+  };
+  return root_ != nullptr && visit(visit, *root_);
+}
+
 bool BuildOwner::realize_lazy_children() {
   if (reconciling_) {
     throw std::logic_error("BuildOwner does not allow reentrant lazy realization");
@@ -255,19 +274,22 @@ LayerTree BuildOwner::layer_frame(BoxConstraints viewport) {
   framing_ = true;
   try {
     flush();
-    constexpr std::size_t max_stabilization_passes = 16;
-    bool stable = false;
-    for (std::size_t pass = 0; pass < max_stabilization_passes; ++pass) {
+    constexpr std::size_t max_realization_rounds = 16;
+    std::size_t realization_rounds = 0;
+    for (;;) {
       synchronize_render_tree();
       render_owner_.layout(viewport);
-      if (!realize_lazy_children()) {
-        stable = true;
+      if (!has_pending_lazy_children()) {
         break;
       }
+      if (realization_rounds == max_realization_rounds) {
+        throw std::logic_error("Lazy child layout did not stabilize");
+      }
+      if (!realize_lazy_children()) {
+        throw std::logic_error("Lazy child request disappeared during realization");
+      }
       flush();
-    }
-    if (!stable) {
-      throw std::logic_error("Lazy child layout did not stabilize");
+      ++realization_rounds;
     }
     LayerTree result = render_owner_.composite_frame();
     last_viewport_ = viewport;

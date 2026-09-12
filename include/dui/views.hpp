@@ -70,16 +70,45 @@ template <class Child> struct SliverToBoxAdapter {
 
 template <class Child> SliverToBoxAdapter(Child) -> SliverToBoxAdapter<Child>;
 
+class SliverCacheExtent {
+public:
+  explicit SliverCacheExtent(double value) : value_(value) {
+    if (!std::isfinite(value) || value < 0.0) {
+      throw std::invalid_argument("Sliver cache extent must be finite and non-negative");
+    }
+  }
+
+  [[nodiscard]] double value() const { return value_; }
+
+private:
+  double value_;
+};
+
+[[nodiscard]] inline SliverCacheExtent cache_extent(double value) {
+  return SliverCacheExtent{value};
+}
+
 template <class... Children> struct SliverFixedExtentList {
   double item_extent;
   std::tuple<Children...> children;
 
   explicit SliverFixedExtentList(double extent, Children... values)
     : item_extent(extent), children(std::move(values)...) {}
+
+  explicit SliverFixedExtentList(double extent, SliverCacheExtent cache, Children... values)
+    : item_extent(extent), children(std::move(values)...), cache_extent_(cache.value()) {}
+
+  [[nodiscard]] double cache_extent() const { return cache_extent_; }
+
+private:
+  double cache_extent_{};
 };
 
 template <class... Children>
 SliverFixedExtentList(double, Children...) -> SliverFixedExtentList<Children...>;
+
+template <class... Children>
+SliverFixedExtentList(double, SliverCacheExtent, Children...) -> SliverFixedExtentList<Children...>;
 
 template <class... Children> struct Fragment {
   std::tuple<Children...> children;
@@ -723,9 +752,13 @@ void update_view(Element& element, const SliverFixedExtentList<Children...>& vie
                  BuildOwner& owner) {
   static_assert((has_box_protocol<Children>() && ...),
                 "SliverFixedExtentList children must use the box protocol");
+  if (!std::isfinite(view.cache_extent()) || view.cache_extent() < 0.0) {
+    throw std::invalid_argument("Sliver cache extent must be finite and non-negative");
+  }
   auto& render = ElementAccess::ensure_render_object<RenderSliverFixedExtentList>(element, owner,
                                                                                   view.item_extent);
   render.set_item_extent(view.item_extent);
+  render.set_cache_extent(view.cache_extent());
   render.clear_lazy_model();
   update_static_children(element, view.children, owner);
 }
@@ -805,6 +838,9 @@ void update_view(Element& element,
   if (!std::isfinite(view.item_extent) || view.item_extent <= 0.0) {
     throw std::invalid_argument("Sliver fixed item extent must be finite and positive");
   }
+  if (!std::isfinite(view.cache_extent()) || view.cache_extent() < 0.0) {
+    throw std::invalid_argument("Sliver cache extent must be finite and non-negative");
+  }
 
   const Source& source = std::get<0>(view.children);
   std::vector<Key> keys;
@@ -823,6 +859,7 @@ void update_view(Element& element,
   auto& render = ElementAccess::ensure_render_object<RenderSliverFixedExtentList>(element, owner,
                                                                                   view.item_extent);
   render.set_item_extent(view.item_extent);
+  render.set_cache_extent(view.cache_extent());
   const std::uint64_t revision =
     ElementAccess::install_lazy_model(element, std::move(descriptor), std::move(keys),
                                       &realize_lazy_fixed_extent_range<Item, KeyFunction, Builder>);

@@ -391,10 +391,12 @@ public:
   RenderSliverFixedExtentList(RenderOwner& owner, double item_extent);
 
   void set_item_extent(double item_extent);
+  void set_cache_extent(double cache_extent);
   void set_lazy_model(std::size_t logical_child_count, std::uint64_t revision);
   void set_mounted_range(std::size_t first, std::size_t count, std::uint64_t revision);
   void clear_lazy_model();
   [[nodiscard]] double item_extent() const { return item_extent_; }
+  [[nodiscard]] double cache_extent() const { return cache_extent_; }
   [[nodiscard]] std::size_t first_visible_index() const { return first_visible_index_; }
   [[nodiscard]] std::size_t visible_child_count() const { return visible_child_count_; }
   [[nodiscard]] std::size_t logical_child_count() const {
@@ -415,6 +417,7 @@ private:
   }
 
   double item_extent_;
+  double cache_extent_{};
   bool lazy_{};
   std::size_t logical_child_count_{};
   std::size_t first_mounted_index_{};
