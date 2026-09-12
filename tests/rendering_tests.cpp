@@ -238,6 +238,29 @@ struct KeepAliveResource {
   }
 };
 
+struct BudgetResource {
+  int* cancellations;
+  int* destructions;
+  bool active{true};
+
+  BudgetResource(int& constructions, int& canceled, int& destroyed)
+    : cancellations(&canceled), destructions(&destroyed) {
+    ++constructions;
+  }
+  BudgetResource(const BudgetResource&) = delete;
+  BudgetResource& operator=(const BudgetResource&) = delete;
+  BudgetResource(BudgetResource&& other) noexcept
+    : cancellations(other.cancellations), destructions(other.destructions),
+      active(std::exchange(other.active, false)) {}
+  ~BudgetResource() {
+    if (active) {
+      ++*destructions;
+    }
+  }
+
+  void request_stop() noexcept { ++*cancellations; }
+};
+
 struct KeepAliveStateItem {
   int id;
   std::vector<std::optional<dui::StateHandle<int>>>* handles;
@@ -263,6 +286,28 @@ struct KeepAliveStateItem {
         return dui::KeyEventResult::handled;
       },
       id == 1);
+  }
+};
+
+struct BudgetStateItem {
+  int id;
+  std::vector<std::optional<dui::StateHandle<int>>>* handles;
+  int* resource_constructions;
+  int* resource_cancellations;
+  int* resource_destructions;
+  dui::Signal<int>* signal;
+
+  auto build(dui::BuildContext& context) const {
+    auto state = context.state<"budget-value">(id);
+    handles->at(static_cast<std::size_t>(id)) = state;
+    static_cast<void>(context.resource<"budget-resource">([&] {
+      return BudgetResource{*resource_constructions, *resource_cancellations,
+                            *resource_destructions};
+    }));
+    if (id == 0) {
+      static_cast<void>(signal->get());
+    }
+    return dui::focusable(dui::Text{"budget " + std::to_string(id)}, {}, id == 0);
   }
 };
 
@@ -1434,52 +1479,213 @@ void lazy_keep_alive_builder_failure_preserves_retry_state() {
   struct Item {
     int id;
   };
-  const std::vector<Item> items{{0}, {1}, {2}};
+  const std::vector<Item> items{{0}, {1}, {2}, {3}};
   bool fail = false;
   auto builder = [&](const Item& item) {
-    if (fail && item.id == 2) {
+    if (fail && item.id == 3) {
       throw std::runtime_error("lazy builder failed");
     }
     return dui::Text{"retry " + std::to_string(item.id)};
   };
   const auto make_view = [&](double offset) {
-    auto source =
-      dui::lazy_for_each(items, dui::key<&Item::id>, builder).keep_alive_when([](const Item& item) {
-        return item.id == 1;
-      });
+    auto source = dui::lazy_for_each(items, dui::key<&Item::id>, builder)
+                    .keep_alive_limit(2)
+                    .keep_alive_when([](const Item&) { return true; });
     return dui::Viewport{offset, dui::SliverFixedExtentList{16.0, std::move(source)}};
   };
 
   dui::BuildOwner owner;
-  owner.render(make_view(16.0));
+  owner.render(make_view(0.0));
   [[maybe_unused]] const auto initial = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
   auto* list_element = owner.root()->children().front().get();
-  const auto retained_id = list_element->children().front()->id();
-  auto* retained_render = list_element->children().front()->render_object();
+  const auto zero_id = list_element->children().front()->id();
+  owner.render(make_view(16.0));
+  [[maybe_unused]] const auto item_one = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  const auto one_id = list_element->children().front()->id();
+  owner.render(make_view(32.0));
+  [[maybe_unused]] const auto established = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  const auto two_id = list_element->children().front()->id();
+  auto* two_render = list_element->children().front()->render_object();
+  require(list_element->kept_alive_child_count() == 2,
+          "builder-failure test did not establish an ordered dormant LRU queue");
 
   fail = true;
-  owner.render(make_view(32.0));
+  owner.render(make_view(48.0));
   bool failed = false;
   try {
     static_cast<void>(owner.frame(dui::BoxConstraints::tight({100.0, 16.0})));
   } catch (const std::runtime_error&) {
     failed = true;
   }
-  require(failed && list_element->children().front()->id() == retained_id &&
-            list_element->children().front()->render_object() == retained_render &&
-            list_element->kept_alive_child_count() == 0,
-          "lazy builder failure mutated active or dormant ownership");
+  require(failed && list_element->children().front()->id() == two_id &&
+            list_element->children().front()->render_object() == two_render &&
+            list_element->kept_alive_child_count() == 2,
+          "lazy builder failure mutated active ownership or the prior LRU queue");
 
   fail = false;
-  owner.render(make_view(32.0));
+  owner.render(make_view(48.0));
   const auto retried = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
-  require(retried.dump().contains("retry 2") && list_element->kept_alive_child_count() == 1,
+  require(retried.dump().contains("retry 3") && list_element->kept_alive_child_count() == 2,
           "lazy builder failure did not recover on a valid retry");
   owner.render(make_view(16.0));
-  [[maybe_unused]] const auto restored = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
-  require(list_element->children().front()->id() == retained_id &&
-            list_element->children().front()->render_object() == retained_render,
-          "retry did not preserve the previously active keep-alive identity");
+  [[maybe_unused]] const auto restored_one = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  require(list_element->children().front()->id() == one_id,
+          "builder failure or retry reordered the prior LRU queue");
+  owner.render(make_view(0.0));
+  [[maybe_unused]] const auto recreated_zero =
+    owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  require(list_element->children().front()->id() != zero_id,
+          "post-retry budget did not evict the original oldest entry");
+}
+
+void lazy_keep_alive_limit_evicts_oldest_dormant_elements() {
+  struct Item {
+    int id;
+  };
+  const std::vector<Item> items{{0}, {1}, {2}, {3}, {4}};
+  std::vector<std::optional<dui::StateHandle<int>>> handles(items.size());
+  int resource_constructions = 0;
+  int resource_cancellations = 0;
+  int resource_destructions = 0;
+  dui::Signal<int> budget_signal{0};
+  auto builder = [&](const Item& item) {
+    return BudgetStateItem{item.id,
+                           &handles,
+                           &resource_constructions,
+                           &resource_cancellations,
+                           &resource_destructions,
+                           &budget_signal};
+  };
+  const auto make_view = [&](double offset, std::size_t limit) {
+    auto source = dui::lazy_for_each(items, dui::key<&Item::id>, builder)
+                    .keep_alive_limit(limit)
+                    .keep_alive_when([](const Item&) { return true; });
+    return dui::Viewport{offset, dui::SliverFixedExtentList{16.0, std::move(source)}};
+  };
+
+  dui::BuildOwner owner;
+  owner.render(make_view(0.0, 2));
+  [[maybe_unused]] const auto item_zero = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  auto* list_element = owner.root()->children().front().get();
+  const auto zero_id = list_element->children().front()->id();
+  require(owner.focused_node() != nullptr && resource_constructions == 1,
+          "budget lifecycle test did not establish focus and resource state");
+
+  owner.render(make_view(16.0, 2));
+  [[maybe_unused]] const auto item_one = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  const auto one_id = list_element->children().front()->id();
+  owner.render(make_view(32.0, 2));
+  [[maybe_unused]] const auto item_two = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  const auto two_id = list_element->children().front()->id();
+  require(list_element->kept_alive_child_count() == 2,
+          "keep-alive limit did not retain the allowed dormant count");
+
+  const auto unmounts_before_first_eviction = owner.unmount_count();
+  owner.render(make_view(48.0, 2));
+  [[maybe_unused]] const auto item_three = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  require(list_element->kept_alive_child_count() == 2 &&
+            owner.unmount_count() > unmounts_before_first_eviction,
+          "keep-alive limit did not evict the oldest dormant subtree");
+  bool zero_handle_rejected = false;
+  try {
+    static_cast<void>(handles[0]->get());
+  } catch (const std::logic_error&) {
+    zero_handle_rejected = true;
+  }
+  budget_signal.set(1);
+  require(zero_handle_rejected && resource_cancellations == 1 && resource_destructions == 1 &&
+            owner.focused_node() == nullptr && owner.pending_build_count() == 0,
+          "budget eviction did not fully unmount the oldest dormant subtree");
+
+  owner.render(make_view(16.0, 2));
+  [[maybe_unused]] const auto restored_one = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  require(list_element->children().front()->id() == one_id,
+          "budgeted keep-alive did not restore retained Element identity");
+  owner.render(make_view(64.0, 2));
+  [[maybe_unused]] const auto item_four = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  owner.render(make_view(32.0, 2));
+  [[maybe_unused]] const auto recreated_two =
+    owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  require(list_element->children().front()->id() != two_id,
+          "least-recently-used dormant Element survived a newer re-eviction");
+  owner.render(make_view(16.0, 2));
+  [[maybe_unused]] const auto restored_one_again =
+    owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  require(list_element->children().front()->id() == one_id &&
+            list_element->children().front()->id() != zero_id,
+          "restored then re-evicted Element did not become most recent");
+
+  const auto unmounts_before_shrink = owner.unmount_count();
+  owner.render(make_view(16.0, 1));
+  require(list_element->kept_alive_child_count() == 1 &&
+            owner.unmount_count() > unmounts_before_shrink,
+          "shrinking keep-alive limit did not synchronously evict oldest excess state");
+  bool four_handle_rejected = false;
+  try {
+    static_cast<void>(handles[4]->get());
+  } catch (const std::logic_error&) {
+    four_handle_rejected = true;
+  }
+  require(four_handle_rejected, "limit shrink left the oldest dormant StateHandle valid");
+  owner.render(make_view(16.0, 3));
+  require(list_element->kept_alive_child_count() == 1,
+          "increasing keep-alive limit resurrected an evicted Element");
+  owner.render(make_view(48.0, 3));
+  [[maybe_unused]] const auto refill_three = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  owner.render(make_view(64.0, 3));
+  [[maybe_unused]] const auto refill_four = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  require(list_element->kept_alive_child_count() == 3,
+          "larger keep-alive limit did not admit new dormant Elements");
+  const auto unmounts_before_zero = owner.unmount_count();
+  owner.render(make_view(64.0, 0));
+  require(list_element->kept_alive_child_count() == 0 &&
+            owner.unmount_count() > unmounts_before_zero,
+          "zero keep-alive limit did not synchronously evict multiple dormant Elements");
+  bool two_handle_rejected = false;
+  try {
+    static_cast<void>(handles[2]->get());
+  } catch (const std::logic_error&) {
+    two_handle_rejected = true;
+  }
+  require(two_handle_rejected, "zero keep-alive limit left dormant state valid");
+  owner.render(make_view(16.0, 3));
+  require(list_element->kept_alive_child_count() == 0,
+          "post-zero limit growth resurrected an evicted Element");
+
+  const auto unlimited_view = [&](double offset) {
+    auto source = dui::lazy_for_each(items, dui::key<&Item::id>, [](const Item& item) {
+                    return dui::Text{"unlimited " + std::to_string(item.id)};
+                  }).keep_alive_when([](const Item&) { return true; });
+    return dui::Viewport{offset, dui::SliverFixedExtentList{16.0, std::move(source)}};
+  };
+  dui::BuildOwner unlimited_owner;
+  for (std::size_t index = 0; index < 4; ++index) {
+    unlimited_owner.render(unlimited_view(static_cast<double>(index) * 16.0));
+    [[maybe_unused]] const auto frame =
+      unlimited_owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  }
+  require(unlimited_owner.root()->children().front()->kept_alive_child_count() == 3,
+          "omitted keep-alive limit changed unbounded compatibility behavior");
+
+  const auto cached_view = [&](double offset) {
+    auto source = dui::lazy_for_each(items, dui::key<&Item::id>,
+                                     [](const Item& item) {
+                                       return dui::Text{"cached budget " + std::to_string(item.id)};
+                                     })
+                    .keep_alive_when([](const Item&) { return true; })
+                    .keep_alive_limit(1);
+    return dui::Viewport{
+      offset, dui::SliverFixedExtentList{16.0, dui::cache_extent(16.0), std::move(source)}};
+  };
+  dui::BuildOwner cached_owner;
+  for (std::size_t index = 1; index < 4; ++index) {
+    cached_owner.render(cached_view(static_cast<double>(index) * 16.0));
+    [[maybe_unused]] const auto frame =
+      cached_owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  }
+  const auto* cached_list = cached_owner.root()->children().front().get();
+  require(cached_list->children().size() == 3 && cached_list->kept_alive_child_count() == 1,
+          "active cache-range children incorrectly consumed the dormant keep-alive limit");
 }
 
 void nested_boundary_recomposes_without_repainting_outer_content() {
@@ -1704,6 +1910,7 @@ int main() {
     lazy_fixed_extent_cache_retains_bounded_keyed_range();
     lazy_keep_alive_preserves_state_outside_the_cache_range();
     lazy_keep_alive_builder_failure_preserves_retry_state();
+    lazy_keep_alive_limit_evicts_oldest_dormant_elements();
     nested_boundary_recomposes_without_repainting_outer_content();
     stack_hit_test_uses_reverse_paint_order_and_records_path();
     color_update_repaints_without_layout();

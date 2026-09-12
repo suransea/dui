@@ -31,6 +31,9 @@ testing until visible. An owning lazy source can additionally use
 `keep_alive_when(predicate)` to retain selected realized Element subtrees after
 they leave that bounded range; dormant entries preserve state, resources,
 dependencies, and focus identity without remaining attached to the RenderSliver.
+`keep_alive_limit(count)` optionally bounds that dormant bucket with
+least-recently-used eviction; active and cache-range children do not consume the
+limit, and omitting it preserves unbounded policy-selected retention.
 Ordinary `ForEach` remains the explicit eager path.
 
 ```cpp

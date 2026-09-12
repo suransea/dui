@@ -179,6 +179,7 @@ private:
   std::any descriptor_;
   std::vector<Key> lazy_keys_;
   std::unordered_set<Key, detail::KeyHash> lazy_keep_alive_keys_;
+  std::optional<std::size_t> lazy_keep_alive_limit_;
   std::uint64_t lazy_revision_{};
   LazyRangeRealizer lazy_range_realizer_{};
   void (*rebuild_)(Element&, BuildOwner&){};
@@ -301,13 +302,19 @@ struct ElementAccess {
     return element.lazy_keep_alive_keys_;
   }
 
+  static std::optional<std::size_t> lazy_keep_alive_limit(const Element& element) {
+    return element.lazy_keep_alive_limit_;
+  }
+
   static std::uint64_t install_lazy_model(Element& element, std::any descriptor,
                                           std::vector<Key> keys,
                                           std::unordered_set<Key, KeyHash> keep_alive_keys,
+                                          std::optional<std::size_t> keep_alive_limit,
                                           Element::LazyRangeRealizer realizer) {
     element.descriptor_ = std::move(descriptor);
     element.lazy_keys_ = std::move(keys);
     element.lazy_keep_alive_keys_ = std::move(keep_alive_keys);
+    element.lazy_keep_alive_limit_ = keep_alive_limit;
     element.lazy_range_realizer_ = realizer;
     ++element.lazy_revision_;
     if (element.lazy_revision_ == 0) {

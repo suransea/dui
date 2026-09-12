@@ -456,6 +456,24 @@ test exclusion, policy cancellation, model deletion, never-realized items,
 owner destruction, duplicate-key transactionality, and no behavior change for
 ordinary eager `ForEach`.
 
+The budgeted keep-alive slice adds an explicit `keep_alive_limit(count)` to an
+owning lazy source. Omitting the limit preserves the policy-selected unbounded
+dormant bucket; a limit of zero disables dormant retention without changing the
+policy snapshot. The budget counts only detached dormant Elements, never active
+or cache-range children. Dormant ownership is ordered from least to most
+recently evicted. Restoring a key removes it from that queue, and if it later
+leaves the active/cache range it becomes most recent. When an insertion exceeds
+the limit, the oldest dormant subtree is synchronously unmounted before frame
+completion. Model deletion and policy rejection run before budget enforcement;
+shrinking a limit during `render()` immediately unmounts oldest excess entries,
+including resource cancellation, dependency removal, focus fallback, and stale
+StateHandle invalidation. Increasing a limit never resurrects an evicted
+subtree. Key validation, policy evaluation, and lazy item building must still
+finish before any ownership mutation, so their failures preserve the prior LRU
+queue. Acceptance covers deterministic multi-item eviction, restoration
+recency, zero/shrinking/increasing limits, unlimited compatibility, immediate
+lifecycle cleanup, retry after builder failure, and unchanged eager `ForEach`.
+
 Raster submission uses one owned Renderer on one worker thread and queues only
 immutable LayerTree snapshots. Submission is thread-safe and FIFO. Stop is
 non-blocking, rejects future submissions, cancels queued frames, and permits the

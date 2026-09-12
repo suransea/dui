@@ -224,6 +224,16 @@ focus, and key-dispatch identity; dirty dormant rebuild exclusion; never-realize
 items; same- and different-source duplicate transactionality; throwing policy;
 immediate policy/deletion cleanup; owner destruction; and builder-failure retry.
 
+The budgeted keep-alive slice adds an optional `keep_alive_limit(count)` to
+`LazyForEach`. Dormant ownership is maintained as an oldest-to-newest queue;
+restoration removes an entry, and a later eviction appends it as most recent.
+Only dormant Elements consume the limit. Overflow and limit shrink synchronously
+unmount oldest subtrees, while zero disables dormant retention and increasing a
+limit never resurrects evicted state. The unlimited default preserves the prior
+policy behavior. Tests cover deterministic LRU order, restored identity and
+recency, immediate StateHandle invalidation, zero/shrink/growth updates, and
+unlimited compatibility.
+
 The first semantics slice adds explicit `semantics(...)` box wrappers,
 `SemanticsProperties`, immutable `SemanticsTree` snapshots, and activation by
 stable RenderObject ID. Transparent RenderObjects promote semantic descendants;
@@ -273,8 +283,9 @@ The prototype has been built and tested with:
   only a vertical axis. Fixed-extent lists virtualize layout, paint traversal,
   and hit testing; `lazy_for_each` additionally virtualizes visible Element
   construction and synchronization with a bounded cache range and optional
-  policy-selected dormant keep-alive. There is no automatic memory-budget or
-  least-recently-used eviction policy for dormant items.
+  policy-selected dormant keep-alive. Dormant retention can be count-bounded
+  with least-recently-used eviction; byte-aware memory budgeting is not yet
+  available.
 - `DisplayListRenderer` consumes LayerTree on the raster worker but still
   flattens it to the headless DisplayList representation; a GPU layer consumer
   is not implemented yet.
@@ -294,4 +305,4 @@ The prototype has been built and tested with:
 
 Run the Win32 text-input suite against a real message-pumped HWND and native
 IMEs to finish M2 verification. M3 continues with a production GPU layer
-consumer, budgeted keep-alive eviction, and native accessibility adapters.
+consumer and native accessibility adapters.

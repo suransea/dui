@@ -292,7 +292,13 @@ public:
       }
     }
     return LazyForEach<Item, KeyFunction, Builder, std::decay_t<Predicate>>{
-      std::move(items_), std::move(keys_), std::move(builder_), std::move(keep_alive_keys)};
+      std::move(items_), std::move(keys_), std::move(builder_), std::move(keep_alive_keys),
+      keep_alive_limit_};
+  }
+
+  [[nodiscard]] LazyForEach keep_alive_limit(std::size_t count) && {
+    keep_alive_limit_ = count;
+    return std::move(*this);
   }
 
   [[nodiscard]] const std::vector<Item>& items() const { return items_; }
@@ -301,6 +307,7 @@ public:
   [[nodiscard]] const std::unordered_set<Key, detail::KeyHash>& keep_alive_keys() const {
     return keep_alive_keys_;
   }
+  [[nodiscard]] std::optional<std::size_t> keep_alive_limit() const { return keep_alive_limit_; }
 
 private:
   template <class, class, class, class> friend class LazyForEach;
@@ -308,14 +315,16 @@ private:
   friend auto lazy_for_each(Range&&, K&&, B&&);
 
   LazyForEach(std::vector<Item> items, std::vector<Key> keys, Builder builder,
-              std::unordered_set<Key, detail::KeyHash> keep_alive_keys)
+              std::unordered_set<Key, detail::KeyHash> keep_alive_keys,
+              std::optional<std::size_t> keep_alive_limit)
     : items_(std::move(items)), keys_(std::move(keys)), builder_(std::move(builder)),
-      keep_alive_keys_(std::move(keep_alive_keys)) {}
+      keep_alive_keys_(std::move(keep_alive_keys)), keep_alive_limit_(keep_alive_limit) {}
 
   std::vector<Item> items_;
   std::vector<Key> keys_;
   Builder builder_;
   std::unordered_set<Key, detail::KeyHash> keep_alive_keys_;
+  std::optional<std::size_t> keep_alive_limit_;
 };
 
 template <std::ranges::input_range Range, class KeyFunction, class Builder>
@@ -349,7 +358,7 @@ template <std::ranges::input_range Range, class KeyFunction, class Builder>
     keys.push_back(std::move(key));
   }
   return LazyForEach<Item, std::decay_t<KeyFunction>, std::decay_t<Builder>>{
-    std::move(items), std::move(keys), std::forward<Builder>(builder), {}};
+    std::move(items), std::move(keys), std::forward<Builder>(builder), {}, std::nullopt};
 }
 
 template <class T>
@@ -835,6 +844,19 @@ void update_view(Element& element, const SliverFixedExtentList<Children...>& vie
   update_static_children(element, view.children, owner);
 }
 
+inline void enforce_lazy_keep_alive_limit(Element& element, BuildOwner& owner) {
+  const auto limit = ElementAccess::lazy_keep_alive_limit(element);
+  auto& kept_alive = ElementAccess::lazy_kept_alive_children(element);
+  if (!limit.has_value() || kept_alive.size() <= *limit) {
+    return;
+  }
+  const std::size_t excess = kept_alive.size() - *limit;
+  for (std::size_t index = 0; index < excess; ++index) {
+    ElementAccess::unmount(owner, kept_alive[index]);
+  }
+  kept_alive.erase(kept_alive.begin(), kept_alive.begin() + static_cast<std::ptrdiff_t>(excess));
+}
+
 template <class Item, class KeyFunction, class Builder, class KeepAlive>
 void realize_lazy_fixed_extent_range(Element& element, BuildOwner& owner, std::size_t first,
                                      std::size_t end, std::uint64_t revision) {
@@ -918,14 +940,15 @@ void realize_lazy_fixed_extent_range(Element& element, BuildOwner& owner, std::s
       ElementAccess::unmount(owner, child);
     }
   };
-  for (auto& child : previous) {
+  for (auto& child : previous_kept_alive) {
     retain_or_unmount(child);
   }
-  for (auto& child : previous_kept_alive) {
+  for (auto& child : previous) {
     retain_or_unmount(child);
   }
   element_children = std::move(next);
   kept_alive_children = std::move(next_kept_alive);
+  enforce_lazy_keep_alive_limit(element, owner);
   auto* render = dynamic_cast<RenderSliverFixedExtentList*>(ElementAccess::render_object(element));
   if (render == nullptr) {
     throw std::logic_error("Lazy Sliver Element lost its RenderSliver");
@@ -963,6 +986,7 @@ void update_view(
   render.set_cache_extent(view.cache_extent());
   const std::uint64_t revision = ElementAccess::install_lazy_model(
     element, std::move(descriptor), std::move(keys), std::move(keep_alive_keys),
+    source.keep_alive_limit(),
     &realize_lazy_fixed_extent_range<Item, KeyFunction, Builder, KeepAlive>);
   auto& kept_alive_children = ElementAccess::lazy_kept_alive_children(element);
   std::erase_if(kept_alive_children, [&](auto& child) {
@@ -972,6 +996,7 @@ void update_view(
     ElementAccess::unmount(owner, child);
     return true;
   });
+  enforce_lazy_keep_alive_limit(element, owner);
   render.set_lazy_model(source.items().size(), revision);
 }
 
