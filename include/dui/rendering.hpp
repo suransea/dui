@@ -272,6 +272,7 @@ public:
 protected:
   [[nodiscard]] virtual bool has_activation_handler() const { return false; }
   [[nodiscard]] virtual bool handle_activate() { return false; }
+  [[nodiscard]] virtual bool handle_semantics_action(SemanticsAction action);
   [[nodiscard]] virtual bool has_repaint_boundary() const { return false; }
   [[nodiscard]] virtual std::optional<SemanticsProperties> semantics_properties() const {
     return std::nullopt;
@@ -485,6 +486,12 @@ protected:
     return static_cast<bool>(on_activate_);
   }
   [[nodiscard]] bool handle_activate() override;
+  [[nodiscard]] std::optional<SemanticsProperties> semantics_properties() const override {
+    if (text_.empty()) {
+      return std::nullopt;
+    }
+    return SemanticsProperties{SemanticsRole::text, text_, {}, true, false};
+  }
 
 private:
   std::string text_;
@@ -501,18 +508,26 @@ protected:
 
 class RenderImage final : public RenderBox {
 public:
-  RenderImage(RenderOwner& owner, std::string asset, Size intrinsic_size);
+  RenderImage(RenderOwner& owner, std::string asset, Size intrinsic_size,
+              std::string semantics_label = {});
 
-  void set_image(std::string asset, Size intrinsic_size);
+  void set_image(std::string asset, Size intrinsic_size, std::string semantics_label = {});
 
 protected:
   void perform_layout() override;
   void paint(PaintingContext& context, Offset offset) override;
   [[nodiscard]] bool hit_test_self(Offset) const override { return true; }
+  [[nodiscard]] std::optional<SemanticsProperties> semantics_properties() const override {
+    if (semantics_label_.empty()) {
+      return std::nullopt;
+    }
+    return SemanticsProperties{SemanticsRole::image, semantics_label_, {}, true, false};
+  }
 
 private:
   std::string asset_;
   Size intrinsic_size_;
+  std::string semantics_label_;
 };
 
 class RenderHStack final : public RenderBox {
@@ -567,6 +582,7 @@ public:
 
   void set_on_activate(std::function<void()> callback) { on_activate_ = std::move(callback); }
   void set_stops_propagation(bool value) { stops_propagation_ = value; }
+  void set_semantics_enabled(bool value) { semantics_enabled_ = value; }
 
 protected:
   void perform_layout() override;
@@ -575,10 +591,15 @@ protected:
     return static_cast<bool>(on_activate_);
   }
   [[nodiscard]] bool handle_activate() override;
+  [[nodiscard]] std::optional<SemanticsProperties> semantics_properties() const override {
+    return SemanticsProperties{
+      SemanticsRole::button, {}, {}, semantics_enabled_ && static_cast<bool>(on_activate_)};
+  }
 
 private:
   std::function<void()> on_activate_;
   bool stops_propagation_{};
+  bool semantics_enabled_{true};
 };
 
 class RenderSemanticsBox final : public RenderBox {

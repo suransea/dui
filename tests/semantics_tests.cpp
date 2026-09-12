@@ -60,6 +60,7 @@ void semantics_tree_preserves_hierarchy_identity_and_actions() {
             group.children[0].label == "first" && group.children[1].label == "second",
           "nested semantics hierarchy or ordering was incorrect");
   require(button.label == "activate" && button.role == dui::SemanticsRole::button &&
+            button.children.size() == 1 && button.children.front().label == "tap" &&
             button.supports(dui::SemanticsAction::activate) &&
             button.bounds == dui::Rect{{0.0, 48.0}, {24.0, 16.0}},
           "semantic role, action, or global bounds were incorrect");
@@ -111,8 +112,93 @@ void semantics_tree_preserves_hierarchy_identity_and_actions() {
           "semantic callback could not safely replace its own retained tree");
   require(!owner.perform_semantics_action(button_id, dui::SemanticsAction::activate),
           "stale semantic node ID remained actionable");
-  require(owner.semantics_tree().roots.empty(),
-          "unannotated replacement did not produce an empty explicit semantics tree");
+  const auto replacement_tree = owner.semantics_tree();
+  require(replacement_tree.roots.size() == 1 &&
+            replacement_tree.roots.front().role == dui::SemanticsRole::text &&
+            replacement_tree.roots.front().label == "replacement",
+          "replacement Text did not produce automatic semantics");
+}
+
+void primitive_views_produce_semantics_and_actions() {
+  dui::BuildOwner owner;
+  int gesture_activations = 0;
+  int text_activations = 0;
+  const auto make_view = [&](std::string image_label, bool gesture_enabled, bool can_focus) {
+    std::function<void()> gesture_callback;
+    if (gesture_enabled) {
+      gesture_callback = [&] { ++gesture_activations; };
+    }
+    return dui::VStack{dui::Text{"hello"},
+                       dui::Image{"decorative.png", {20.0, 10.0}},
+                       dui::Image{"portrait.png", {20.0, 10.0}, std::move(image_label)},
+                       dui::on_tap(dui::Text{"tap"}, std::move(gesture_callback)),
+                       dui::FocusView<dui::Text>{dui::Text{"focus"}, {}, can_focus, false},
+                       dui::Text{"direct", [&] { ++text_activations; }},
+                       dui::Text{"outside", [] {}}};
+  };
+
+  owner.render(make_view("portrait", true, false));
+  [[maybe_unused]] const auto frame = owner.frame(dui::BoxConstraints::tight({200.0, 78.0}));
+  const auto tree = owner.semantics_tree();
+  require(tree.roots.size() == 5 && tree.roots[0].role == dui::SemanticsRole::text &&
+            tree.roots[0].label == "hello" && tree.roots[1].role == dui::SemanticsRole::image &&
+            tree.roots[1].label == "portrait",
+          "Text, labeled Image, or unlabeled Image primitive semantics were incorrect");
+
+  const auto& gesture = tree.roots[2];
+  const auto& focus = tree.roots[3];
+  const auto& direct = tree.roots[4];
+  require(gesture.role == dui::SemanticsRole::button && gesture.label.empty() &&
+            gesture.children.size() == 1 && gesture.children.front().label == "tap" &&
+            gesture.supports(dui::SemanticsAction::activate),
+          "GestureDetector did not produce an actionable semantic container");
+  require(focus.role == dui::SemanticsRole::button && !focus.enabled &&
+            focus.children.size() == 1 && focus.children.front().label == "focus" &&
+            !focus.supports(dui::SemanticsAction::activate),
+          "disabled FocusView exposed an enabled semantic action");
+  owner.dispatch_pointer({30, dui::BuildOwner::PointerPhase::down, {1.0, 53.0}});
+  owner.dispatch_pointer({30, dui::BuildOwner::PointerPhase::up, {1.0, 53.0}});
+  require(owner.focused_node() == nullptr, "disabled FocusView participated in pointer activation");
+  require(direct.role == dui::SemanticsRole::text && direct.label == "direct" &&
+            direct.bounds == dui::Rect{{0.0, 68.0}, {48.0, 10.0}} &&
+            direct.supports(dui::SemanticsAction::activate) &&
+            !owner.perform_semantics_action(owner.root()->children()[6]->render_object()->id(),
+                                            dui::SemanticsAction::activate),
+          "activatable Text clipping or off-frame exclusion was incorrect");
+  require(owner.perform_semantics_action(gesture.id, dui::SemanticsAction::activate) &&
+            gesture_activations == 1,
+          "GestureDetector semantic action did not report callback dispatch");
+  require(owner.perform_semantics_action(direct.id, dui::SemanticsAction::activate) &&
+            text_activations == 1,
+          "Text semantic action reused pointer propagation as its success result");
+
+  auto* image_render = owner.root()->children()[2]->render_object();
+  const auto image_id = tree.roots[1].id;
+  const auto layouts = image_render->layout_count();
+  const auto paints = image_render->paint_count();
+  owner.render(make_view("updated portrait", true, false));
+  require(owner.pending_layout_count() == 0 && owner.pending_paint_count() == 0,
+          "image semantic-label update dirtied layout or paint");
+  const auto updated = owner.semantics_tree();
+  const auto* updated_image = updated.find(image_id);
+  require(updated_image != nullptr && updated_image->label == "updated portrait" &&
+            image_render->layout_count() == layouts && image_render->paint_count() == paints,
+          "image semantic-label update lost identity or changed rendering");
+
+  const auto gesture_id = gesture.id;
+  const auto focus_id = focus.id;
+  owner.render(make_view("updated portrait", false, true));
+  require(owner.pending_layout_count() == 0 && owner.pending_paint_count() == 0,
+          "primitive callback or enabled-state update dirtied rendering");
+  const auto action_update = owner.semantics_tree();
+  const auto* disabled_gesture = action_update.find(gesture_id);
+  const auto* enabled_focus = action_update.find(focus_id);
+  require(disabled_gesture != nullptr && !disabled_gesture->enabled &&
+            !disabled_gesture->supports(dui::SemanticsAction::activate) &&
+            enabled_focus != nullptr && enabled_focus->enabled &&
+            enabled_focus->supports(dui::SemanticsAction::activate) &&
+            owner.perform_semantics_action(focus_id, dui::SemanticsAction::activate),
+          "primitive callback or focus eligibility update retained stale actions");
 }
 
 void semantics_tree_clips_lazy_visible_children() {
@@ -122,9 +208,7 @@ void semantics_tree_clips_lazy_visible_children() {
   const std::vector<Item> items{{0}, {1}, {2}, {3}, {4}, {5}};
   int activations = 0;
   auto builder = [&](const Item& item) {
-    return dui::semantics(dui::Text{"item"},
-                          properties("item " + std::to_string(item.id), dui::SemanticsRole::text),
-                          [&] { ++activations; });
+    return dui::Text{"item " + std::to_string(item.id), [&] { ++activations; }};
   };
   const auto make_view = [&](double offset) {
     auto source =
@@ -205,6 +289,7 @@ void render_owner_rejects_semantics_without_current_layout() {
 int main() {
   try {
     semantics_tree_preserves_hierarchy_identity_and_actions();
+    primitive_views_produce_semantics_and_actions();
     semantics_tree_clips_lazy_visible_children();
     render_owner_rejects_semantics_without_current_layout();
   } catch (const std::exception& error) {

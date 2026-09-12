@@ -68,6 +68,9 @@ trees with stable IDs, roles, labels, values, actions, and globally clipped
 bounds. Collection follows visible paint ranges, excluding hidden, clipped,
 lazy-cache, and dormant keep-alive content. Native accessibility bridges such as
 macOS Accessibility and Windows UI Automation are not implemented yet.
+Visible `Text`, labeled `Image`, `GestureDetector`, and `FocusView` primitives
+also contribute semantics without requiring an explicit wrapper; image asset
+identifiers are never used as accessibility labels.
 
 ## Build
 

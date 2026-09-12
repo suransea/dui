@@ -903,6 +903,18 @@ bool RenderBox::hit_test_protocol(HitTestResult& result, Offset position) {
   return false;
 }
 
+bool RenderObject::handle_semantics_action(SemanticsAction action) {
+  switch (action) {
+  case SemanticsAction::activate:
+    if (!has_activation_handler()) {
+      return false;
+    }
+    static_cast<void>(handle_activate());
+    return true;
+  }
+  return false;
+}
+
 RenderText::RenderText(RenderOwner& owner, std::string text, std::function<void()> on_activate)
   : RenderBox(owner), text_(std::move(text)), on_activate_(std::move(on_activate)) {}
 
@@ -933,23 +945,27 @@ bool RenderText::handle_activate() {
   return false;
 }
 
-RenderImage::RenderImage(RenderOwner& owner, std::string asset, Size intrinsic_size)
-  : RenderBox(owner), asset_(std::move(asset)), intrinsic_size_(intrinsic_size) {
+RenderImage::RenderImage(RenderOwner& owner, std::string asset, Size intrinsic_size,
+                         std::string semantics_label)
+  : RenderBox(owner), asset_(std::move(asset)), intrinsic_size_(intrinsic_size),
+    semantics_label_(std::move(semantics_label)) {
   static_cast<void>(BoxConstraints{}.constrain(intrinsic_size));
 }
 
-void RenderImage::set_image(std::string asset, Size intrinsic_size) {
+void RenderImage::set_image(std::string asset, Size intrinsic_size, std::string semantics_label) {
   static_cast<void>(BoxConstraints{}.constrain(intrinsic_size));
   const bool size_changed = intrinsic_size_ != intrinsic_size;
   const bool asset_changed = asset_ != asset;
-  if (!size_changed && !asset_changed) {
+  const bool semantics_changed = semantics_label_ != semantics_label;
+  if (!size_changed && !asset_changed && !semantics_changed) {
     return;
   }
   asset_ = std::move(asset);
   intrinsic_size_ = intrinsic_size;
+  semantics_label_ = std::move(semantics_label);
   if (size_changed) {
     mark_needs_layout();
-  } else {
+  } else if (asset_changed) {
     mark_needs_paint();
   }
 }
@@ -1418,7 +1434,7 @@ SemanticsTree RenderOwner::semantics_tree() const {
     return result;
   };
 
-  return SemanticsTree{collect(collect, *root_, {}, std::nullopt)};
+  return SemanticsTree{collect(collect, *root_, {}, Rect{{}, root_->size()})};
 }
 
 bool RenderOwner::perform_semantics_action(std::uint64_t id, SemanticsAction action) {
@@ -1437,7 +1453,7 @@ bool RenderOwner::perform_semantics_action(std::uint64_t id, SemanticsAction act
   }
   switch (action) {
   case SemanticsAction::activate:
-    return object->has_activation_handler() && object->activate();
+    return object->handle_semantics_action(action);
   }
   return false;
 }

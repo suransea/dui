@@ -219,8 +219,25 @@ unsupported nodes. Property-only updates retain node identity and require no
 layout or paint. Acceptance covers transparent and nested hierarchy, deterministic
 ordering, hidden subtree exclusion, viewport clipping, lazy scrolling, stable
 updates, enabled/disabled activation, callback-driven mutation, stale IDs, and
-queries before the first completed frame. Platform accessibility adapters and
-automatic semantics inferred from primitive Views remain later slices.
+queries before the first completed frame. Platform accessibility adapters remain
+later slices.
+
+The automatic primitive-semantics slice makes visible non-empty `Text` produce
+a text node whose label is its displayed value. `Image` accepts an optional
+semantic label and produces an image node only when that label is non-empty;
+asset identifiers are never exposed as accessibility text. `GestureDetector`
+and `FocusView` produce button-role containers around their semantic
+descendants. A gesture container is enabled while it has a callback; a focus
+container is enabled only while its FocusNode can accept focus. Disabled
+containers expose no activation action. Explicit `semantics(...)` remains an
+ordinary semantic container, so inferred descendants preserve deterministic
+hierarchy rather than being silently merged or discarded. Semantic activation
+reports whether a supported callback was dispatched, independently of the
+pointer-routing boolean that controls event propagation. Property-only image
+label and callback-presence updates retain RenderObject identity and do not
+dirty layout or paint. Acceptance covers primitive hierarchy and roles,
+unlabeled-image exclusion, action dispatch, disabled focus, explicit/inferred
+nesting, stable property updates, clipping, and lazy visible-range exclusion.
 
 A platform text-input adapter connects a real host window to an operating
 system text service; a synthetic or terminal-only backend does not satisfy this

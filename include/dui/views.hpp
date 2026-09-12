@@ -27,6 +27,7 @@ struct Text {
 struct Image {
   std::string asset;
   Size intrinsic_size;
+  std::string semantics_label{};
 };
 
 template <class... Children> struct VStack {
@@ -744,8 +745,8 @@ inline void update_view(Element& element, const Text& text, BuildOwner& owner) {
 inline void update_view(Element& element, const Image& image, BuildOwner& owner) {
   ElementAccess::debug_value(element) = image.asset;
   ElementAccess::ensure_render_object<RenderImage>(element, owner, image.asset,
-                                                   image.intrinsic_size)
-    .set_image(image.asset, image.intrinsic_size);
+                                                   image.intrinsic_size, image.semantics_label)
+    .set_image(image.asset, image.intrinsic_size, image.semantics_label);
   auto& children = ElementAccess::children(element);
   while (!children.empty()) {
     ElementAccess::unmount(owner, children.back());
@@ -1038,6 +1039,7 @@ void update_view(Element& element, const GestureDetector<Child>& view, BuildOwne
     ElementAccess::ensure_render_object<RenderActionBox>(element, owner, view.on_tap, false);
   action.set_on_activate(view.on_tap);
   action.set_stops_propagation(false);
+  action.set_semantics_enabled(true);
   auto& children = ElementAccess::children(element);
   if (children.empty()) {
     children.push_back(nullptr);
@@ -1057,10 +1059,15 @@ void update_view(Element& element, const FocusView<Child>& view, BuildOwner& own
       node->request_focus();
     }
   };
+  std::function<void()> focus_action;
+  if (view.can_focus) {
+    focus_action = request_focus;
+  }
   auto& action =
-    ElementAccess::ensure_render_object<RenderActionBox>(element, owner, request_focus, true);
-  action.set_on_activate(std::move(request_focus));
+    ElementAccess::ensure_render_object<RenderActionBox>(element, owner, focus_action, true);
+  action.set_on_activate(std::move(focus_action));
   action.set_stops_propagation(true);
+  action.set_semantics_enabled(view.can_focus);
   if (is_new_focus_node && view.autofocus && view.can_focus) {
     focus_node->request_focus();
   }

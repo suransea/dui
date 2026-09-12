@@ -237,6 +237,18 @@ without layout or paint. Tests cover nested hierarchy, hidden ancestors,
 partial viewport clipping, lazy scrolling, action reentrancy and stale IDs,
 pre-frame and dirty-layout rejection, and callback-driven tree replacement.
 
+The automatic primitive-semantics slice adds text nodes for visible non-empty
+`Text`, opt-in image nodes through `Image::semantics_label`, and button-role
+containers for `GestureDetector` and `FocusView`. Unlabeled images remain
+semantically transparent instead of leaking asset identifiers. Focus containers
+reflect `can_focus`, and disabled nodes expose no action. Semantic callback
+dispatch now reports success independently of pointer propagation, allowing
+non-stopping text and gesture handlers to remain valid accessibility actions.
+Image label and callback-presence updates retain RenderObject identity without
+layout or paint. Tests cover inferred and explicit hierarchy, primitive roles,
+unlabeled images, disabled focus, action results, property-only updates, and
+automatic lazy-list clipping/cache/keep-alive exclusion.
+
 ## Verification
 
 The prototype has been built and tested with:
@@ -282,4 +294,4 @@ The prototype has been built and tested with:
 
 Run the Win32 text-input suite against a real message-pumped HWND and native
 IMEs to finish M2 verification. M3 continues with a production GPU layer
-consumer, budgeted keep-alive eviction, and automatic primitive semantics.
+consumer, budgeted keep-alive eviction, and native accessibility adapters.
