@@ -259,6 +259,16 @@ layout or paint. Tests cover inferred and explicit hierarchy, primitive roles,
 unlabeled images, disabled focus, action results, property-only updates, and
 automatic lazy-list clipping/cache/keep-alive exclusion.
 
+The accessibility-update slice adds `SemanticsEntry`, `SemanticsChange`, and a
+stateful `SemanticsDiffer` for native adapter consumption. Entries flatten
+parent ID, sibling index, properties, clipped geometry, and actions without
+retaining RenderObjects. Initial additions are parent-first; additions precede
+reparent/update records; removals and clear are child-first. Equivalent trees
+emit no changes, while zero or duplicate IDs reject transactionally without
+replacing the previous snapshot. Tests cover property/action changes, sibling
+reorder, moves into new parents, subtree ordering, malformed inputs, clear, and
+BuildOwner-produced snapshots. Native API calls remain outside this layer.
+
 ## Verification
 
 The prototype has been built and tested with:

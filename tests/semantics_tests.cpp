@@ -21,6 +21,18 @@ dui::SemanticsProperties properties(std::string label, dui::SemanticsRole role, 
   return {role, std::move(label), {}, enabled, hidden};
 }
 
+dui::SemanticsNode node(std::uint64_t id, std::string label,
+                        std::vector<dui::SemanticsNode> children = {}) {
+  return {id,
+          dui::SemanticsRole::generic,
+          std::move(label),
+          {},
+          true,
+          {{static_cast<double>(id), 0.0}, {10.0, 10.0}},
+          {},
+          std::move(children)};
+}
+
 void semantics_tree_preserves_hierarchy_identity_and_actions() {
   dui::BuildOwner owner;
   int activations = 0;
@@ -284,6 +296,125 @@ void render_owner_rejects_semantics_without_current_layout() {
   require(dirty_rejected, "RenderOwner exposed semantics with dirty layout geometry");
 }
 
+void semantics_differ_emits_deterministic_transactional_updates() {
+  dui::SemanticsDiffer differ;
+  auto first_child = node(2, "child");
+  first_child.role = dui::SemanticsRole::text;
+  auto removed_root = node(3, "removed");
+  removed_root.role = dui::SemanticsRole::image;
+  const dui::SemanticsTree first{{node(1, "root", {first_child}), removed_root}};
+
+  const auto initial = differ.update(first);
+  require(initial.changes.size() == 3 &&
+            initial.changes[0].kind == dui::SemanticsChangeKind::added &&
+            initial.changes[0].entry.id == 1 && !initial.changes[0].entry.parent_id.has_value() &&
+            initial.changes[1].entry.id == 2 && initial.changes[1].entry.parent_id == 1 &&
+            initial.changes[1].entry.child_index == 0 && initial.changes[2].entry.id == 3,
+          "initial semantics diff was not emitted in parent-first preorder");
+  const auto* stable_entries = differ.entries().data();
+  require(differ.update(first).empty() && differ.entries().data() == stable_entries,
+          "equivalent semantics snapshot emitted changes or replaced retained storage");
+
+  auto moved_child = node(2, "child");
+  moved_child.role = dui::SemanticsRole::text;
+  moved_child.value = "changed value";
+  moved_child.enabled = false;
+  moved_child.bounds = {{20.0, 30.0}, {40.0, 50.0}};
+  moved_child.actions.push_back(dui::SemanticsAction::activate);
+  auto added_child = node(5, "added child");
+  auto new_parent = node(4, "new parent", {moved_child, added_child});
+  auto updated_root = node(1, "updated root");
+  updated_root.actions.push_back(dui::SemanticsAction::activate);
+  const dui::SemanticsTree second{{new_parent, updated_root}};
+  const auto delta = differ.update(second);
+  const std::array expected_ids{std::uint64_t{4}, std::uint64_t{5}, std::uint64_t{2},
+                                std::uint64_t{1}, std::uint64_t{3}};
+  const std::array expected_kinds{dui::SemanticsChangeKind::added, dui::SemanticsChangeKind::added,
+                                  dui::SemanticsChangeKind::updated,
+                                  dui::SemanticsChangeKind::updated,
+                                  dui::SemanticsChangeKind::removed};
+  require(delta.changes.size() == expected_ids.size(),
+          "semantic add/update/remove delta had the wrong size");
+  for (std::size_t index = 0; index < expected_ids.size(); ++index) {
+    require(delta.changes[index].entry.id == expected_ids[index] &&
+              delta.changes[index].kind == expected_kinds[index],
+            "semantic delta ordering was not deterministic");
+  }
+  require(delta.changes[2].entry.parent_id == 4 && delta.changes[2].entry.child_index == 0 &&
+            delta.changes[2].entry.role == dui::SemanticsRole::text &&
+            delta.changes[2].entry.value == "changed value" && !delta.changes[2].entry.enabled &&
+            delta.changes[2].entry.bounds == dui::Rect{{20.0, 30.0}, {40.0, 50.0}} &&
+            delta.changes[2].entry.supports(dui::SemanticsAction::activate) &&
+            delta.changes[3].entry.child_index == 1 &&
+            delta.changes[3].entry.supports(dui::SemanticsAction::activate) &&
+            delta.changes[4].entry.label == "removed",
+          "semantic move, reorder, action update, or removal metadata was incorrect");
+
+  const dui::SemanticsTree duplicate{{node(6, "first"), node(6, "duplicate")}};
+  bool duplicate_rejected = false;
+  try {
+    static_cast<void>(differ.update(duplicate));
+  } catch (const std::logic_error&) {
+    duplicate_rejected = true;
+  }
+  const dui::SemanticsTree zero{{node(0, "zero")}};
+  bool zero_rejected = false;
+  try {
+    static_cast<void>(differ.update(zero));
+  } catch (const std::logic_error&) {
+    zero_rejected = true;
+  }
+  require(duplicate_rejected && zero_rejected && differ.entries().size() == 4 &&
+            differ.entries()[0].id == 4 && differ.entries()[3].id == 1,
+          "malformed semantics update replaced the retained snapshot");
+
+  const auto cleared = differ.clear();
+  const std::array clear_ids{std::uint64_t{1}, std::uint64_t{5}, std::uint64_t{2},
+                             std::uint64_t{4}};
+  require(cleared.changes.size() == clear_ids.size(),
+          "semantics clear emitted the wrong removal count");
+  for (std::size_t index = 0; index < clear_ids.size(); ++index) {
+    require(cleared.changes[index].kind == dui::SemanticsChangeKind::removed &&
+              cleared.changes[index].entry.id == clear_ids[index],
+            "semantics clear did not remove children before parents");
+  }
+  require(differ.clear().empty() && differ.entries().empty(),
+          "clearing an empty semantics differ emitted changes");
+
+  dui::SemanticsDiffer removal_differ;
+  const dui::SemanticsTree subtree{{node(10, "parent", {node(11, "middle", {node(12, "leaf")})})}};
+  static_cast<void>(removal_differ.update(subtree));
+  const auto subtree_removed = removal_differ.update({});
+  require(subtree_removed.changes.size() == 3 &&
+            subtree_removed.changes[0].kind == dui::SemanticsChangeKind::removed &&
+            subtree_removed.changes[0].entry.id == 12 &&
+            subtree_removed.changes[0].entry.label == "leaf" &&
+            subtree_removed.changes[1].kind == dui::SemanticsChangeKind::removed &&
+            subtree_removed.changes[1].entry.id == 11 &&
+            subtree_removed.changes[2].kind == dui::SemanticsChangeKind::removed &&
+            subtree_removed.changes[2].entry.id == 10,
+          "snapshot update did not remove a nested subtree child-first");
+
+  dui::BuildOwner owner;
+  owner.render(dui::Text{"generated", [] {}});
+  [[maybe_unused]] const auto generated_frame =
+    owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  const auto generated = differ.update(owner.semantics_tree());
+  require(generated.changes.size() == 1 &&
+            generated.changes.front().kind == dui::SemanticsChangeKind::added &&
+            generated.changes.front().entry.label == "generated",
+          "SemanticsDiffer rejected a BuildOwner snapshot");
+  owner.render(dui::Text{"updated", [] {}});
+  const auto generated_update = differ.update(owner.semantics_tree());
+  require(generated_update.changes.size() == 1 &&
+            generated_update.changes.front().kind == dui::SemanticsChangeKind::updated &&
+            generated_update.changes.front().entry.label == "updated",
+          "SemanticsDiffer did not update a stable BuildOwner node");
+  owner.render(dui::Text{"updated", [] {}});
+  require(differ.update(owner.semantics_tree()).empty(),
+          "callback replacement with unchanged actions emitted a semantics update");
+}
+
 } // namespace
 
 int main() {
@@ -292,6 +423,7 @@ int main() {
     primitive_views_produce_semantics_and_actions();
     semantics_tree_clips_lazy_visible_children();
     render_owner_rejects_semantics_without_current_layout();
+    semantics_differ_emits_deterministic_transactional_updates();
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';
     return EXIT_FAILURE;

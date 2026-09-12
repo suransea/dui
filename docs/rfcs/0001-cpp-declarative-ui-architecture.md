@@ -239,6 +239,25 @@ dirty layout or paint. Acceptance covers primitive hierarchy and roles,
 unlabeled-image exclusion, action dispatch, disabled focus, explicit/inferred
 nesting, stable property updates, clipping, and lazy visible-range exclusion.
 
+The accessibility-update slice adds a platform-neutral `SemanticsDiffer` between
+immutable trees and native adapters. Each flattened `SemanticsEntry` contains a
+nonzero stable node ID, optional parent ID, sibling index, role, label, value,
+enabled state, clipped bounds, and actions. The first snapshot emits every node
+as added in parent-first preorder. Later snapshots emit new nodes parent-first,
+then changed or reparented existing nodes in new preorder, then removed nodes in
+reverse old preorder so children are removed before parents. A change carries
+the complete new entry for add/update and the complete old entry for removal.
+Equivalent snapshots emit nothing; callback identity is intentionally absent,
+so replacing a callback without changing supported actions is not an
+accessibility update. Clearing emits the same deterministic child-first removals.
+Zero or duplicate IDs reject an update before replacing the retained flattened
+snapshot. Allocation or validation failure likewise preserves the previous
+snapshot. This protocol does not call native APIs or retain RenderObjects; UIA,
+macOS Accessibility, AT-SPI, and mobile adapters remain separate consumers.
+Acceptance covers first publication, property/action changes, sibling reorder,
+reparenting into a new parent, subtree add/remove ordering, no-op snapshots,
+clear, malformed-tree transactionality, and snapshots produced by BuildOwner.
+
 A platform text-input adapter connects a real host window to an operating
 system text service; a synthetic or terminal-only backend does not satisfy this
 requirement. One conditionally built desktop implementation is sufficient for

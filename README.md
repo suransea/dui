@@ -74,6 +74,8 @@ macOS Accessibility and Windows UI Automation are not implemented yet.
 Visible `Text`, labeled `Image`, `GestureDetector`, and `FocusView` primitives
 also contribute semantics without requiring an explicit wrapper; image asset
 identifiers are never used as accessibility labels.
+`SemanticsDiffer` flattens successive snapshots into deterministic add, update,
+move, and child-first removal records for future native accessibility adapters.
 
 ## Build
 

@@ -215,6 +215,48 @@ struct SemanticsTree {
   [[nodiscard]] const SemanticsNode* find(std::uint64_t id) const;
 };
 
+struct SemanticsEntry {
+  std::uint64_t id{};
+  std::optional<std::uint64_t> parent_id;
+  std::size_t child_index{};
+  SemanticsRole role{SemanticsRole::generic};
+  std::string label;
+  std::string value;
+  bool enabled{true};
+  Rect bounds{};
+  std::vector<SemanticsAction> actions;
+
+  [[nodiscard]] bool supports(SemanticsAction action) const {
+    return std::find(actions.begin(), actions.end(), action) != actions.end();
+  }
+
+  friend bool operator==(const SemanticsEntry&, const SemanticsEntry&) = default;
+};
+
+enum class SemanticsChangeKind { added, updated, removed };
+
+struct SemanticsChange {
+  SemanticsChangeKind kind{};
+  SemanticsEntry entry;
+};
+
+struct SemanticsUpdate {
+  std::vector<SemanticsChange> changes;
+
+  [[nodiscard]] bool empty() const { return changes.empty(); }
+};
+
+class SemanticsDiffer {
+public:
+  [[nodiscard]] SemanticsUpdate update(const SemanticsTree& tree);
+  [[nodiscard]] SemanticsUpdate clear();
+  // Invalidated by a non-empty update or clear.
+  [[nodiscard]] std::span<const SemanticsEntry> entries() const { return entries_; }
+
+private:
+  std::vector<SemanticsEntry> entries_;
+};
+
 struct HitTestEntry {
   RenderObject* target{};
   Offset local_position{};

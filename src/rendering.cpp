@@ -1367,6 +1367,78 @@ const SemanticsNode* SemanticsTree::find(std::uint64_t id) const {
   return nullptr;
 }
 
+SemanticsUpdate SemanticsDiffer::update(const SemanticsTree& tree) {
+  std::vector<SemanticsEntry> next;
+  std::unordered_set<std::uint64_t> ids;
+  struct PendingNode {
+    const SemanticsNode* node;
+    std::optional<std::uint64_t> parent_id;
+    std::size_t child_index;
+  };
+  std::vector<PendingNode> pending;
+  for (std::size_t index = tree.roots.size(); index > 0; --index) {
+    pending.push_back({&tree.roots[index - 1], std::nullopt, index - 1});
+  }
+  while (!pending.empty()) {
+    const PendingNode current = pending.back();
+    pending.pop_back();
+    const SemanticsNode& node = *current.node;
+    if (node.id == 0 || !ids.insert(node.id).second) {
+      throw std::logic_error("SemanticsTree node IDs must be nonzero and unique");
+    }
+    next.push_back({node.id, current.parent_id, current.child_index, node.role, node.label,
+                    node.value, node.enabled, node.bounds, node.actions});
+    for (std::size_t index = node.children.size(); index > 0; --index) {
+      pending.push_back({&node.children[index - 1], node.id, index - 1});
+    }
+  }
+
+  std::unordered_map<std::uint64_t, const SemanticsEntry*> previous_by_id;
+  previous_by_id.reserve(entries_.size());
+  for (const SemanticsEntry& entry : entries_) {
+    previous_by_id.emplace(entry.id, &entry);
+  }
+  std::unordered_set<std::uint64_t> next_ids;
+  next_ids.reserve(next.size());
+  for (const SemanticsEntry& entry : next) {
+    next_ids.insert(entry.id);
+  }
+
+  std::vector<SemanticsChange> changes;
+  for (const SemanticsEntry& entry : next) {
+    if (!previous_by_id.contains(entry.id)) {
+      changes.push_back({SemanticsChangeKind::added, entry});
+    }
+  }
+  for (const SemanticsEntry& entry : next) {
+    const auto previous = previous_by_id.find(entry.id);
+    if (previous != previous_by_id.end() && *previous->second != entry) {
+      changes.push_back({SemanticsChangeKind::updated, entry});
+    }
+  }
+  for (auto entry = entries_.rbegin(); entry != entries_.rend(); ++entry) {
+    if (!next_ids.contains(entry->id)) {
+      changes.push_back({SemanticsChangeKind::removed, *entry});
+    }
+  }
+
+  if (changes.empty()) {
+    return {};
+  }
+  entries_ = std::move(next);
+  return SemanticsUpdate{std::move(changes)};
+}
+
+SemanticsUpdate SemanticsDiffer::clear() {
+  std::vector<SemanticsChange> changes;
+  changes.reserve(entries_.size());
+  for (auto entry = entries_.rbegin(); entry != entries_.rend(); ++entry) {
+    changes.push_back({SemanticsChangeKind::removed, *entry});
+  }
+  entries_.clear();
+  return SemanticsUpdate{std::move(changes)};
+}
+
 SemanticsTree RenderOwner::semantics_tree() const {
   if (!has_completed_frame_ || !dirty_layout_.empty()) {
     throw std::logic_error("semantics_tree requires completed current layout");
