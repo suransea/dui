@@ -224,6 +224,19 @@ focus, and key-dispatch identity; dirty dormant rebuild exclusion; never-realize
 items; same- and different-source duplicate transactionality; throwing policy;
 immediate policy/deletion cleanup; owner destruction; and builder-failure retry.
 
+The first semantics slice adds explicit `semantics(...)` box wrappers,
+`SemanticsProperties`, immutable `SemanticsTree` snapshots, and activation by
+stable RenderObject ID. Transparent RenderObjects promote semantic descendants;
+annotated nodes preserve hierarchy and deterministic paint order. Collection
+uses checked global offsets, accumulated half-open clips, and visible child
+ranges, excluding hidden subtrees, fully clipped content, lazy cache entries,
+and dormant keep-alive Elements. Actions are authorized against the current
+tree before resolving their RenderObject, so stale, disabled, hidden, cached,
+and dormant IDs cannot invoke callbacks. Property-only updates retain identity
+without layout or paint. Tests cover nested hierarchy, hidden ancestors,
+partial viewport clipping, lazy scrolling, action reentrancy and stale IDs,
+pre-frame and dirty-layout rejection, and callback-driven tree replacement.
+
 ## Verification
 
 The prototype has been built and tested with:
@@ -261,9 +274,12 @@ The prototype has been built and tested with:
   component or callback.
 - The only native text-input adapter is currently Win32 IMM32. Other platforms
   still require adapters.
+- Semantics snapshots and actions are platform neutral; macOS Accessibility,
+  Windows UI Automation, Linux AT-SPI, and mobile accessibility adapters are not
+  implemented.
 
 ## Next Milestone
 
 Run the Win32 text-input suite against a real message-pumped HWND and native
 IMEs to finish M2 verification. M3 continues with a production GPU layer
-consumer, budgeted keep-alive eviction, and semantics.
+consumer, budgeted keep-alive eviction, and automatic primitive semantics.

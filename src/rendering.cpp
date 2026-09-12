@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <iterator>
+#include <limits>
 #include <ranges>
 #include <sstream>
 #include <stdexcept>
@@ -15,6 +17,47 @@ std::string number(double value) {
   std::ostringstream output;
   output << std::fixed << std::setprecision(1) << value;
   return std::move(output).str();
+}
+
+std::optional<Rect> intersect_rects(Rect left, Rect right) {
+  const auto valid = [](Rect rect) {
+    return std::isfinite(rect.origin.x) && std::isfinite(rect.origin.y) &&
+           std::isfinite(rect.size.width) && std::isfinite(rect.size.height) &&
+           rect.size.width >= 0.0 && rect.size.height >= 0.0;
+  };
+  if (!valid(left) || !valid(right)) {
+    throw std::overflow_error("Semantics clip bounds must be finite and non-negative");
+  }
+  const long double x =
+    std::max(static_cast<long double>(left.origin.x), static_cast<long double>(right.origin.x));
+  const long double y =
+    std::max(static_cast<long double>(left.origin.y), static_cast<long double>(right.origin.y));
+  const long double right_edge =
+    std::min(static_cast<long double>(left.origin.x) + left.size.width,
+             static_cast<long double>(right.origin.x) + right.size.width);
+  const long double bottom_edge =
+    std::min(static_cast<long double>(left.origin.y) + left.size.height,
+             static_cast<long double>(right.origin.y) + right.size.height);
+  if (right_edge <= x || bottom_edge <= y) {
+    return std::nullopt;
+  }
+  const long double width = right_edge - x;
+  const long double height = bottom_edge - y;
+  if (width > std::numeric_limits<double>::max() || height > std::numeric_limits<double>::max()) {
+    throw std::overflow_error("Semantics clip intersection overflowed");
+  }
+  return Rect{{static_cast<double>(x), static_cast<double>(y)},
+              {static_cast<double>(width), static_cast<double>(height)}};
+}
+
+Offset add_semantics_offset(Offset left, Offset right) {
+  const long double x = static_cast<long double>(left.x) + right.x;
+  const long double y = static_cast<long double>(left.y) + right.y;
+  if (!std::isfinite(x) || !std::isfinite(y) || std::abs(x) > std::numeric_limits<double>::max() ||
+      std::abs(y) > std::numeric_limits<double>::max()) {
+    throw std::overflow_error("Semantics global offset overflowed");
+  }
+  return {static_cast<double>(x), static_cast<double>(y)};
 }
 
 void append_layer(const Layer& layer, DisplayListBuilder& builder, Offset offset) {
@@ -1054,6 +1097,31 @@ bool RenderActionBox::handle_activate() {
   return stops_propagation;
 }
 
+void RenderSemanticsBox::perform_layout() {
+  if (children().empty()) {
+    set_size(constraints().constrain({}));
+    return;
+  }
+  auto& child = static_cast<RenderBox&>(*children().front());
+  layout_child(child, constraints().loosen(), {});
+  set_size(constraints().constrain(child.size()));
+}
+
+bool RenderSemanticsBox::handle_activate() {
+  if (!on_activate_) {
+    return false;
+  }
+  auto callback = on_activate_;
+  callback();
+  return true;
+}
+
+void RenderSemanticsBox::validate_child_count(std::size_t count) const {
+  if (count > 1) {
+    throw std::logic_error("RenderSemanticsBox accepts at most one RenderBox child");
+  }
+}
+
 void RenderView::perform_layout() {
   const Size viewport = constraints().biggest();
   if (!std::isfinite(viewport.width) || !std::isfinite(viewport.height)) {
@@ -1244,6 +1312,7 @@ LayerTree RenderOwner::composite_frame() {
   dirty_paint_.clear();
   dirty_compositing_.clear();
   last_layer_tree_ = LayerTree{root_->size(), root_->retained_layer_};
+  has_completed_frame_ = true;
   return last_layer_tree_;
 }
 
@@ -1260,6 +1329,117 @@ HitTestResult RenderOwner::hit_test_path(Offset position) {
   HitTestResult result;
   static_cast<void>(root_->hit_test(result, position));
   return result;
+}
+
+const SemanticsNode* SemanticsTree::find(std::uint64_t id) const {
+  const auto find_in = [&](auto&& self, const SemanticsNode& node) -> const SemanticsNode* {
+    if (node.id == id) {
+      return &node;
+    }
+    for (const SemanticsNode& child : node.children) {
+      if (const SemanticsNode* found = self(self, child); found != nullptr) {
+        return found;
+      }
+    }
+    return nullptr;
+  };
+  for (const SemanticsNode& root : roots) {
+    if (const SemanticsNode* found = find_in(find_in, root); found != nullptr) {
+      return found;
+    }
+  }
+  return nullptr;
+}
+
+SemanticsTree RenderOwner::semantics_tree() const {
+  if (!has_completed_frame_ || !dirty_layout_.empty()) {
+    throw std::logic_error("semantics_tree requires completed current layout");
+  }
+  const auto collect = [&](auto&& self, const RenderObject& object, Offset offset,
+                           std::optional<Rect> clip) -> std::vector<SemanticsNode> {
+    if (const auto object_clip = object.paint_clip(offset); object_clip.has_value()) {
+      if (clip.has_value()) {
+        clip = intersect_rects(*clip, *object_clip);
+        if (!clip.has_value()) {
+          return {};
+        }
+      } else {
+        clip = object_clip;
+      }
+    }
+
+    const auto properties = object.semantics_properties();
+    if (properties.has_value() && properties->hidden) {
+      return {};
+    }
+
+    const auto [first_child, last_child] = object.paint_child_range();
+    if (first_child > last_child || last_child > object.children_.size()) {
+      throw std::logic_error("RenderObject returned an invalid semantics child range");
+    }
+    std::vector<SemanticsNode> descendants;
+    for (std::size_t index = first_child; index < last_child; ++index) {
+      const RenderObject& child = *object.children_[index];
+      auto child_nodes =
+        self(self, child, add_semantics_offset(offset, child.paint_offset()), clip);
+      descendants.insert(descendants.end(), std::make_move_iterator(child_nodes.begin()),
+                         std::make_move_iterator(child_nodes.end()));
+    }
+    if (!properties.has_value()) {
+      return descendants;
+    }
+
+    const auto* box = dynamic_cast<const RenderBox*>(&object);
+    if (box == nullptr) {
+      throw std::logic_error("Semantics nodes currently require RenderBox geometry");
+    }
+    Rect bounds{offset, box->size()};
+    if (clip.has_value()) {
+      const auto clipped_bounds = intersect_rects(bounds, *clip);
+      if (!clipped_bounds.has_value()) {
+        return {};
+      }
+      bounds = *clipped_bounds;
+    }
+
+    SemanticsNode node{object.id_,
+                       properties->role,
+                       properties->label,
+                       properties->value,
+                       properties->enabled,
+                       bounds,
+                       {},
+                       std::move(descendants)};
+    if (properties->enabled && object.has_activation_handler()) {
+      node.actions.push_back(SemanticsAction::activate);
+    }
+    std::vector<SemanticsNode> result;
+    result.push_back(std::move(node));
+    return result;
+  };
+
+  return SemanticsTree{collect(collect, *root_, {}, std::nullopt)};
+}
+
+bool RenderOwner::perform_semantics_action(std::uint64_t id, SemanticsAction action) {
+  const SemanticsTree tree = semantics_tree();
+  const SemanticsNode* node = tree.find(id);
+  if (node == nullptr || !node->supports(action)) {
+    return false;
+  }
+  RenderObject* object = resolve(id);
+  if (object == nullptr) {
+    return false;
+  }
+  const auto properties = object->semantics_properties();
+  if (!properties.has_value() || properties->hidden || !properties->enabled) {
+    return false;
+  }
+  switch (action) {
+  case SemanticsAction::activate:
+    return object->has_activation_handler() && object->activate();
+  }
+  return false;
 }
 
 RenderObject* RenderOwner::resolve(RenderObject::Id id) const {

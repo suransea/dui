@@ -2,6 +2,7 @@
 
 #include "dui/geometry.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -179,6 +180,41 @@ class RenderObject;
 class RenderBox;
 class RenderSliver;
 
+enum class SemanticsRole { generic, text, image, button };
+
+enum class SemanticsAction { activate };
+
+struct SemanticsProperties {
+  SemanticsRole role{SemanticsRole::generic};
+  std::string label;
+  std::string value;
+  bool enabled{true};
+  bool hidden{};
+
+  friend bool operator==(const SemanticsProperties&, const SemanticsProperties&) = default;
+};
+
+struct SemanticsNode {
+  std::uint64_t id{};
+  SemanticsRole role{SemanticsRole::generic};
+  std::string label;
+  std::string value;
+  bool enabled{true};
+  Rect bounds{};
+  std::vector<SemanticsAction> actions;
+  std::vector<SemanticsNode> children;
+
+  [[nodiscard]] bool supports(SemanticsAction action) const {
+    return std::find(actions.begin(), actions.end(), action) != actions.end();
+  }
+};
+
+struct SemanticsTree {
+  std::vector<SemanticsNode> roots;
+
+  [[nodiscard]] const SemanticsNode* find(std::uint64_t id) const;
+};
+
 struct HitTestEntry {
   RenderObject* target{};
   Offset local_position{};
@@ -237,6 +273,9 @@ protected:
   [[nodiscard]] virtual bool has_activation_handler() const { return false; }
   [[nodiscard]] virtual bool handle_activate() { return false; }
   [[nodiscard]] virtual bool has_repaint_boundary() const { return false; }
+  [[nodiscard]] virtual std::optional<SemanticsProperties> semantics_properties() const {
+    return std::nullopt;
+  }
   virtual void paint(PaintingContext&, Offset) {}
 
 private:
@@ -542,6 +581,34 @@ private:
   bool stops_propagation_{};
 };
 
+class RenderSemanticsBox final : public RenderBox {
+public:
+  RenderSemanticsBox(RenderOwner& owner, SemanticsProperties properties,
+                     std::function<void()> on_activate = {})
+    : RenderBox(owner), properties_(std::move(properties)), on_activate_(std::move(on_activate)) {}
+
+  void set_semantics(SemanticsProperties properties, std::function<void()> on_activate) {
+    properties_ = std::move(properties);
+    on_activate_ = std::move(on_activate);
+  }
+
+protected:
+  void perform_layout() override;
+  [[nodiscard]] bool has_activation_handler() const override {
+    return static_cast<bool>(on_activate_);
+  }
+  [[nodiscard]] bool handle_activate() override;
+  [[nodiscard]] std::optional<SemanticsProperties> semantics_properties() const override {
+    return properties_;
+  }
+
+private:
+  void validate_child_count(std::size_t count) const override;
+
+  SemanticsProperties properties_;
+  std::function<void()> on_activate_;
+};
+
 class RenderRepaintBoundary final : public RenderBox {
 public:
   explicit RenderRepaintBoundary(RenderOwner& owner) : RenderBox(owner) {}
@@ -575,6 +642,8 @@ public:
   [[nodiscard]] DisplayList frame(BoxConstraints viewport);
   [[nodiscard]] RenderObject* hit_test(Offset position);
   [[nodiscard]] HitTestResult hit_test_path(Offset position);
+  [[nodiscard]] SemanticsTree semantics_tree() const;
+  [[nodiscard]] bool perform_semantics_action(std::uint64_t id, SemanticsAction action);
   [[nodiscard]] RenderObject* resolve(RenderObject::Id id) const;
 
   [[nodiscard]] std::size_t pending_layout_count() const { return dirty_layout_.size(); }
@@ -607,6 +676,7 @@ private:
   std::size_t paint_depth_{};
   std::unique_ptr<RenderView> root_;
   LayerTree last_layer_tree_;
+  bool has_completed_frame_{};
 };
 
 } // namespace dui

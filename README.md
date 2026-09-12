@@ -63,6 +63,12 @@ through GestureArena, and a conditional Win32 IMM32 adapter provides native
 text input. Native Windows IME verification and adapters for other platforms
 remain in progress.
 
+Explicit `semantics(...)` wrappers produce immutable platform-neutral semantics
+trees with stable IDs, roles, labels, values, actions, and globally clipped
+bounds. Collection follows visible paint ranges, excluding hidden, clipped,
+lazy-cache, and dormant keep-alive content. Native accessibility bridges such as
+macOS Accessibility and Windows UI Automation are not implemented yet.
+
 ## Build
 
 ```sh

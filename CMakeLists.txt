@@ -64,6 +64,11 @@ if(DUI_BUILD_TESTS)
     dui_configure_target(dui_lazy_stabilization_tests)
     add_test(NAME dui_lazy_stabilization_tests COMMAND dui_lazy_stabilization_tests)
 
+    add_executable(dui_semantics_tests tests/semantics_tests.cpp)
+    target_link_libraries(dui_semantics_tests PRIVATE dui::dui)
+    dui_configure_target(dui_semantics_tests)
+    add_test(NAME dui_semantics_tests COMMAND dui_semantics_tests)
+
     add_executable(dui_input_tests tests/input_tests.cpp)
     target_link_libraries(dui_input_tests PRIVATE dui::dui)
     dui_configure_target(dui_input_tests)

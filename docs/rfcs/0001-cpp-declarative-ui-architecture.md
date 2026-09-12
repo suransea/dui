@@ -202,6 +202,26 @@ Semantics is a render pipeline phase rather than an optional widget-library
 feature, so platform accessibility can be added without changing RenderObject
 contracts.
 
+The first semantics slice exposes an explicit `semantics(child, properties,
+on_activate)` box wrapper and produces an immutable, platform-neutral
+`SemanticsTree` after a completed frame. A node contains its stable RenderObject
+ID, role, label, value, enabled state, supported actions, clipped global bounds,
+and ordered semantic children. Unannotated RenderObjects are transparent and
+promote semantic descendants to the nearest annotated ancestor. Hidden nodes
+exclude their complete subtree. Collection follows each RenderObject's paint
+offset, clip, and visible child range, so fully clipped content, offscreen Sliver
+children, lazy cache entries, and dormant keep-alive Elements are absent. Bounds
+use half-open rectangle intersection and partially visible nodes expose only the
+clipped rectangle. Semantic activation resolves the current RenderObject by ID,
+revalidates that the node is enabled and supports activation, copies the
+callback before invocation, and returns false for stale, hidden, disabled, or
+unsupported nodes. Property-only updates retain node identity and require no
+layout or paint. Acceptance covers transparent and nested hierarchy, deterministic
+ordering, hidden subtree exclusion, viewport clipping, lazy scrolling, stable
+updates, enabled/disabled activation, callback-driven mutation, stale IDs, and
+queries before the first completed frame. Platform accessibility adapters and
+automatic semantics inferred from primitive Views remain later slices.
+
 A platform text-input adapter connects a real host window to an operating
 system text service; a synthetic or terminal-only backend does not satisfy this
 requirement. One conditionally built desktop implementation is sufficient for

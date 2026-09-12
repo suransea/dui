@@ -209,6 +209,8 @@ public:
   [[nodiscard]] LayerTree layer_frame(BoxConstraints viewport);
   [[nodiscard]] DisplayList frame(BoxConstraints viewport);
   [[nodiscard]] RenderObject* hit_test(Offset position);
+  [[nodiscard]] SemanticsTree semantics_tree();
+  [[nodiscard]] bool perform_semantics_action(std::uint64_t id, SemanticsAction action);
   void dispatch_pointer(PointerEvent event);
   [[nodiscard]] KeyEventResult dispatch_key(const KeyEvent& event) {
     return focus_manager_.dispatch_key(event);

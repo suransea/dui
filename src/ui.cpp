@@ -314,6 +314,22 @@ RenderObject* BuildOwner::hit_test(Offset position) {
   return render_owner_.hit_test(position);
 }
 
+SemanticsTree BuildOwner::semantics_tree() {
+  if (!last_viewport_.has_value()) {
+    throw std::logic_error("semantics_tree requires a completed frame");
+  }
+  static_cast<void>(layer_frame(*last_viewport_));
+  return render_owner_.semantics_tree();
+}
+
+bool BuildOwner::perform_semantics_action(std::uint64_t id, SemanticsAction action) {
+  if (!last_viewport_.has_value()) {
+    throw std::logic_error("perform_semantics_action requires a completed frame");
+  }
+  static_cast<void>(layer_frame(*last_viewport_));
+  return render_owner_.perform_semantics_action(id, action);
+}
+
 void BuildOwner::dispatch_pointer(PointerEvent event) {
   const std::shared_ptr<OwnerLifetime> lifetime = lifetime_;
   HitTestResult hit_path;

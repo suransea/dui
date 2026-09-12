@@ -209,6 +209,23 @@ template <class Child>
                                         autofocus};
 }
 
+template <class Child> struct Semantics {
+  Child child;
+  SemanticsProperties properties;
+  std::function<void()> on_activate;
+};
+
+template <class Child> [[nodiscard]] auto semantics(Child&& child, SemanticsProperties properties) {
+  return Semantics<std::decay_t<Child>>{std::forward<Child>(child), std::move(properties), {}};
+}
+
+template <class Child, class Callback>
+[[nodiscard]] auto semantics(Child&& child, SemanticsProperties properties,
+                             Callback&& on_activate) {
+  return Semantics<std::decay_t<Child>>{std::forward<Child>(child), std::move(properties),
+                                        std::function<void()>{std::forward<Callback>(on_activate)}};
+}
+
 template <class V> struct Optional {
   std::optional<V> child;
 };
@@ -375,6 +392,8 @@ template <class Child> inline constexpr bool is_builtin_view<GestureDetector<Chi
 
 template <class Child> inline constexpr bool is_builtin_view<FocusView<Child>> = true;
 
+template <class Child> inline constexpr bool is_builtin_view<Semantics<Child>> = true;
+
 template <class V> inline constexpr bool is_builtin_view<Optional<V>> = true;
 
 template <class Left, class Right>
@@ -445,6 +464,10 @@ template <class C> struct ViewProtocol<FocusView<C>> {
   static constexpr bool box = true;
   static constexpr bool sliver = false;
 };
+template <class C> struct ViewProtocol<Semantics<C>> {
+  static constexpr bool box = true;
+  static constexpr bool sliver = false;
+};
 
 template <class T> consteval bool has_box_protocol();
 
@@ -487,6 +510,9 @@ template <class C> struct SingleBoxProtocol<GestureDetector<C>> {
   static constexpr bool value = true;
 };
 template <class C> struct SingleBoxProtocol<FocusView<C>> {
+  static constexpr bool value = true;
+};
+template <class C> struct SingleBoxProtocol<Semantics<C>> {
   static constexpr bool value = true;
 };
 template <class C, class... V> struct SingleBoxProtocol<EnvironmentScope<C, V...>> {
@@ -602,6 +628,8 @@ template <class Child> void update_view(Element&, const GestureDetector<Child>&,
 
 template <class Child> void update_view(Element&, const FocusView<Child>&, BuildOwner&);
 
+template <class Child> void update_view(Element&, const Semantics<Child>&, BuildOwner&);
+
 template <class V> void update_view(Element&, const Optional<V>&, BuildOwner&);
 
 template <class Left, class Right>
@@ -678,6 +706,10 @@ template <class Child> [[nodiscard]] std::string debug_name(const GestureDetecto
 
 template <class Child> [[nodiscard]] std::string debug_name(const FocusView<Child>&) {
   return "Focus";
+}
+
+template <class Child> [[nodiscard]] std::string debug_name(const Semantics<Child>&) {
+  return "Semantics";
 }
 
 template <class V> [[nodiscard]] std::string debug_name(const Optional<V>&) { return "Optional"; }
@@ -1033,6 +1065,19 @@ void update_view(Element& element, const FocusView<Child>& view, BuildOwner& own
     focus_node->request_focus();
   }
 
+  auto& children = ElementAccess::children(element);
+  if (children.empty()) {
+    children.push_back(nullptr);
+  }
+  reconcile_child(children.front(), view.child, owner, &element, Key{});
+}
+
+template <class Child>
+void update_view(Element& element, const Semantics<Child>& view, BuildOwner& owner) {
+  static_assert(has_box_protocol<Child>(), "Semantics child must use the box protocol");
+  auto& render = ElementAccess::ensure_render_object<RenderSemanticsBox>(
+    element, owner, view.properties, view.on_activate);
+  render.set_semantics(view.properties, view.on_activate);
   auto& children = ElementAccess::children(element);
   if (children.empty()) {
     children.push_back(nullptr);
