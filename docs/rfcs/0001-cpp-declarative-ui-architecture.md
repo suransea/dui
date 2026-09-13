@@ -616,8 +616,42 @@ bytes. Capture and serialization reject nesting at the documented 512-node
 depth bound with `length_error`; lookup uses an iterative traversal. Empty-owner,
 active-tree, dirty-tree, keyed, focus, RenderObject, dormant keep-alive,
 snapshot-lifetime, lookup, escaping, and deterministic repeated-capture cases
-form acceptance. Timeline events, live transport, state-value opt-in, and a GUI
-frontend remain later tooling slices.
+form acceptance. This inspector slice excludes timeline events, live transport,
+state-value opt-in, and a GUI frontend; timeline collection begins in the
+following slice.
+
+The first timeline slice adds an opt-in, platform-neutral `TimelineRecorder` to
+`BuildOwner`. A caller supplies a positive fixed event capacity and may supply a
+monotonic `TimelineClock`; the default clock uses steady time. With no recorder
+attached, reconciliation and frame production perform no clock reads or event
+storage. Each completed event owns its sequence and span IDs, optional parent
+span and frame IDs, UI lane, phase, completed or failed outcome, start time,
+non-negative duration, pass index, and phase-specific work count. Initial phases
+are root reconciliation, dirty build flushing, complete frame production,
+render-tree synchronization, each layout stabilization pass, each productive
+lazy realization pass, and final retained-layer composition. Frame work counts
+productive realization rounds; build records the pending dirty count at entry;
+layout and composition record their pending queue counts at entry.
+
+Spans are assigned sequence IDs at entry and snapshots return retained events in
+that order even though nested spans complete before their parents. Scope exit
+records failure without replacing the operation's original exception, and a
+later operation remains recordable. The recorder retains the most recently
+completed events in a preallocated ring, increments an exact dropped-event count
+on overflow, and allocates no storage while finishing a span. `snapshot()`
+returns detached values; `clear()` removes retained events and resets the drop
+count without reusing sequence, span, or frame IDs. Recorder attachment changes
+are rejected during reconciliation or framing so one operation cannot split
+across recorders. Recorder mutation and owner instrumentation are UI-thread
+confined in this slice; raster-lane collection, cross-thread snapshotting, trace
+serialization, live transport, and a GUI frontend remain later work.
+
+Timeline acceptance covers deterministic fake-clock timing and nesting, dirty
+work counts, successful and failed reconciliation/frame closure, recovery after
+failure, retained clean frames, exact lazy stabilization pass ordering, bounded
+overflow and clear behavior, detached lifetime, reentrant attachment rejection,
+and a disabled path that performs no clock reads. Existing output, identity,
+queue, and exception behavior must remain unchanged with recording enabled.
 
 ## Prototype acceptance criteria
 

@@ -60,6 +60,12 @@ ownership, and RenderObject protocol/dirty/counter metadata. Snapshots support
 stable-ID lookup and canonical JSON serialization while retaining no framework
 or native pointers.
 
+An optional fixed-capacity `TimelineRecorder` captures correlated UI-thread
+spans for reconciliation, dirty builds, frame production, render-tree sync,
+layout stabilization, lazy realization, and retained-layer composition.
+Callers can inject a monotonic clock for deterministic profiling and retain
+detached snapshots without exposing framework pointers.
+
 Implemented layout Views include `VStack`, `HStack`, `Stack`, `Padding`,
 `ColoredBox`, `Viewport`, and `SliverToBoxAdapter`; primitives include `Text`
 and `Image`. `SliverFixedExtentList` provides the first scrolling-list protocol.

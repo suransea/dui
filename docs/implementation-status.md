@@ -318,7 +318,8 @@ technology observation remain target-OS work.
 
 ## M4: Tooling and Platforms
 
-Status: initial structured-inspector slice implemented and verified.
+Status: structured-inspector and initial UI timeline slices implemented and
+verified.
 
 `BuildOwner::inspect()` now captures an owned, passive Element-tree snapshot.
 Each node records stable identity/generation, depth, name/value/key, active or
@@ -335,7 +336,24 @@ enforce a 512-node depth bound while lookup remains iterative. Existing
 `dump_tree()` output remains compatible. Tests cover empty, dirty, framed,
 keyed, focused, escaped/malformed UTF-8, bounded deep, deterministic, owner-
 independent, reentrancy-rejected, and dormant Sliver snapshots. Timeline
-collection, live transport, opt-in value inspection, and GUI tooling remain
+serialization, live transport, opt-in value inspection, and GUI tooling remain
+pending.
+
+The initial timeline slice adds an opt-in, fixed-capacity `TimelineRecorder`
+with a steady default clock and injectable monotonic clocks. `BuildOwner`
+records correlated reconciliation, dirty-build, complete-frame, render-tree
+synchronization, per-pass layout, productive lazy realization, and final
+composition spans. Events retain start-order sequence/span IDs, parent and frame
+IDs, outcome, non-negative timing, pass index, and work count. Successful and
+failed spans close without changing the original operation result or exception;
+recorder replacement is rejected during active reconciliation or framing.
+Completed events enter a preallocated newest-retaining ring, overflow increments
+an exact drop count, and snapshots remain valid after recorder and owner
+destruction. Tests use fake clocks to cover exact timing and nesting, disabled
+clock reads, dirty and clean work counts, failure recovery, bounded overflow,
+clear without ID reuse, and all successful sixteen-pass and rejected
+seventeen-pass lazy stabilization phases. Raster-thread events, cross-thread
+observation, serialization, live transport, and timeline GUI tooling remain
 pending.
 
 ## Verification

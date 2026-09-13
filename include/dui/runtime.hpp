@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <any>
+#include <chrono>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -246,6 +247,76 @@ struct InspectorSnapshot {
   friend bool operator==(const InspectorSnapshot&, const InspectorSnapshot&) = default;
 };
 
+enum class TimelineLane { ui };
+
+enum class TimelinePhase {
+  reconcile,
+  build,
+  frame,
+  synchronize_render_tree,
+  layout,
+  lazy_realization,
+  composite,
+};
+
+enum class TimelineOutcome { completed, failed };
+
+struct TimelineEvent {
+  std::uint64_t sequence{};
+  std::uint64_t span_id{};
+  std::uint64_t parent_span_id{};
+  std::uint64_t frame_id{};
+  TimelineLane lane{TimelineLane::ui};
+  TimelinePhase phase{TimelinePhase::reconcile};
+  TimelineOutcome outcome{TimelineOutcome::completed};
+  std::chrono::nanoseconds start{};
+  std::chrono::nanoseconds duration{};
+  std::size_t pass{};
+  std::size_t work_count{};
+
+  friend bool operator==(const TimelineEvent&, const TimelineEvent&) = default;
+};
+
+struct TimelineSnapshot {
+  std::vector<TimelineEvent> events;
+  std::size_t dropped_event_count{};
+
+  friend bool operator==(const TimelineSnapshot&, const TimelineSnapshot&) = default;
+};
+
+class TimelineClock {
+public:
+  virtual ~TimelineClock() = default;
+  [[nodiscard]] virtual std::chrono::nanoseconds now() const noexcept = 0;
+};
+
+class TimelineRecorder final {
+public:
+  explicit TimelineRecorder(std::size_t capacity);
+  TimelineRecorder(std::size_t capacity, std::shared_ptr<TimelineClock> clock);
+  ~TimelineRecorder();
+
+  TimelineRecorder(const TimelineRecorder&) = delete;
+  TimelineRecorder& operator=(const TimelineRecorder&) = delete;
+  TimelineRecorder(TimelineRecorder&&) = delete;
+  TimelineRecorder& operator=(TimelineRecorder&&) = delete;
+
+  [[nodiscard]] TimelineSnapshot snapshot() const;
+  void clear() noexcept;
+
+private:
+  friend class BuildOwner;
+  class Impl;
+
+  [[nodiscard]] TimelineEvent begin(TimelinePhase phase, std::uint64_t parent_span_id,
+                                    std::uint64_t frame_id, std::size_t pass,
+                                    std::size_t work_count) noexcept;
+  void finish(TimelineEvent event, TimelineOutcome outcome) noexcept;
+  [[nodiscard]] std::uint64_t next_frame_id() noexcept;
+
+  std::unique_ptr<Impl> impl_;
+};
+
 class BuildOwner {
 public:
   enum class PointerPhase { down, move, up, cancel };
@@ -277,6 +348,7 @@ public:
   [[nodiscard]] std::shared_ptr<FocusNode> focused_node() const {
     return focus_manager_.focused_node();
   }
+  void set_timeline_recorder(std::shared_ptr<TimelineRecorder> recorder);
 
   [[nodiscard]] const Element* root() const { return root_.get(); }
   [[nodiscard]] Element* root() { return root_.get(); }
@@ -297,6 +369,28 @@ public:
 
 private:
   struct PointerTapRoute;
+  struct TimelineSpan {
+    TimelineSpan() = default;
+    TimelineSpan(BuildOwner& owner, std::shared_ptr<TimelineRecorder> recorder,
+                 TimelineEvent event);
+    ~TimelineSpan();
+
+    TimelineSpan(const TimelineSpan&) = delete;
+    TimelineSpan& operator=(const TimelineSpan&) = delete;
+    TimelineSpan(TimelineSpan&& other) noexcept;
+    TimelineSpan& operator=(TimelineSpan&&) = delete;
+
+    [[nodiscard]] std::uint64_t id() const { return active_ ? event_.span_id : 0; }
+    void complete() noexcept;
+    void fail() noexcept;
+    void set_work_count(std::size_t work_count) { event_.work_count = work_count; }
+
+  private:
+    BuildOwner* owner_{};
+    std::shared_ptr<TimelineRecorder> recorder_;
+    TimelineEvent event_{};
+    bool active_{};
+  };
 
   friend class BuildContext;
   friend class DependencySource;
@@ -315,9 +409,16 @@ private:
   [[nodiscard]] Element* resolve(Element::Id id, std::uint64_t generation) const;
   void clear_dependencies(Element& element);
   void synchronize_render_tree();
+  void flush_with_timeline(std::uint64_t parent_span_id, std::uint64_t frame_id);
   [[nodiscard]] bool has_pending_lazy_children() const;
   [[nodiscard]] bool realize_lazy_children();
   void forget_dependency(Element::Id id, std::uint64_t generation, DependencySource& dependency);
+  [[nodiscard]] TimelineSpan begin_timeline(TimelinePhase phase, std::uint64_t parent_span_id,
+                                            std::uint64_t frame_id, std::size_t pass,
+                                            std::size_t work_count) noexcept;
+  void finish_timeline(const std::shared_ptr<TimelineRecorder>& recorder, TimelineEvent event,
+                       TimelineOutcome outcome) noexcept;
+  [[nodiscard]] std::uint64_t next_timeline_frame_id() noexcept;
 
   template <class T>
   [[nodiscard]] T& state(Element::Id id, std::uint64_t generation, std::uint64_t slot);
@@ -334,6 +435,7 @@ private:
   GestureArena gesture_arena_;
   std::unordered_map<PointerId, std::shared_ptr<PointerTapRoute>> pointer_tap_routes_;
   FocusManager focus_manager_;
+  std::shared_ptr<TimelineRecorder> timeline_recorder_;
   bool reconciling_{};
   bool framing_{};
 };

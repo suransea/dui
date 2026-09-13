@@ -8,6 +8,116 @@
 
 namespace dui {
 
+namespace {
+
+class SteadyTimelineClock final : public TimelineClock {
+public:
+  std::chrono::nanoseconds now() const noexcept override {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch());
+  }
+};
+
+} // namespace
+
+class TimelineRecorder::Impl {
+public:
+  Impl(std::size_t capacity, std::shared_ptr<TimelineClock> clock)
+    : events_(capacity), clock_(std::move(clock)) {
+    if (capacity == 0) {
+      throw std::invalid_argument("TimelineRecorder capacity must be positive");
+    }
+    if (clock_ == nullptr) {
+      throw std::invalid_argument("TimelineRecorder requires a clock");
+    }
+  }
+
+  [[nodiscard]] TimelineEvent begin(TimelinePhase phase, std::uint64_t parent_span_id,
+                                    std::uint64_t frame_id, std::size_t pass,
+                                    std::size_t work_count) noexcept {
+    const std::uint64_t sequence = next_sequence_++;
+    const std::uint64_t span_id = next_span_id_++;
+    return TimelineEvent{sequence,
+                         span_id,
+                         parent_span_id,
+                         frame_id,
+                         TimelineLane::ui,
+                         phase,
+                         TimelineOutcome::completed,
+                         clock_->now(),
+                         {},
+                         pass,
+                         work_count};
+  }
+
+  void finish(TimelineEvent event, TimelineOutcome outcome) noexcept {
+    const auto end = clock_->now();
+    event.outcome = outcome;
+    event.duration = end >= event.start ? end - event.start : std::chrono::nanoseconds{};
+    if (event_count_ < events_.size()) {
+      events_[(first_event_ + event_count_) % events_.size()] = event;
+      ++event_count_;
+      return;
+    }
+    events_[first_event_] = event;
+    first_event_ = (first_event_ + 1) % events_.size();
+    ++dropped_event_count_;
+  }
+
+  [[nodiscard]] TimelineSnapshot snapshot() const {
+    TimelineSnapshot result;
+    result.events.reserve(event_count_);
+    for (std::size_t index = 0; index < event_count_; ++index) {
+      result.events.push_back(events_[(first_event_ + index) % events_.size()]);
+    }
+    std::ranges::sort(result.events, {}, &TimelineEvent::sequence);
+    result.dropped_event_count = dropped_event_count_;
+    return result;
+  }
+
+  void clear() noexcept {
+    first_event_ = 0;
+    event_count_ = 0;
+    dropped_event_count_ = 0;
+  }
+
+  [[nodiscard]] std::uint64_t next_frame_id() noexcept { return next_frame_id_++; }
+
+private:
+  std::vector<TimelineEvent> events_;
+  std::shared_ptr<TimelineClock> clock_;
+  std::size_t first_event_{};
+  std::size_t event_count_{};
+  std::size_t dropped_event_count_{};
+  std::uint64_t next_sequence_{1};
+  std::uint64_t next_span_id_{1};
+  std::uint64_t next_frame_id_{1};
+};
+
+TimelineRecorder::TimelineRecorder(std::size_t capacity)
+  : TimelineRecorder(capacity, std::make_shared<SteadyTimelineClock>()) {}
+
+TimelineRecorder::TimelineRecorder(std::size_t capacity, std::shared_ptr<TimelineClock> clock)
+  : impl_(std::make_unique<Impl>(capacity, std::move(clock))) {}
+
+TimelineRecorder::~TimelineRecorder() = default;
+
+TimelineSnapshot TimelineRecorder::snapshot() const { return impl_->snapshot(); }
+
+void TimelineRecorder::clear() noexcept { impl_->clear(); }
+
+TimelineEvent TimelineRecorder::begin(TimelinePhase phase, std::uint64_t parent_span_id,
+                                      std::uint64_t frame_id, std::size_t pass,
+                                      std::size_t work_count) noexcept {
+  return impl_->begin(phase, parent_span_id, frame_id, pass, work_count);
+}
+
+void TimelineRecorder::finish(TimelineEvent event, TimelineOutcome outcome) noexcept {
+  impl_->finish(event, outcome);
+}
+
+std::uint64_t TimelineRecorder::next_frame_id() noexcept { return impl_->next_frame_id(); }
+
 struct BuildOwner::PointerTapRoute final : GestureArenaMember {
   explicit PointerTapRoute(std::vector<RenderObject::Id> value) : route(std::move(value)) {}
 
@@ -83,6 +193,64 @@ BuildOwner::~BuildOwner() {
   lifetime_->owner = nullptr;
 }
 
+BuildOwner::TimelineSpan::TimelineSpan(BuildOwner& owner,
+                                       std::shared_ptr<TimelineRecorder> recorder,
+                                       TimelineEvent event)
+  : owner_(&owner), recorder_(std::move(recorder)), event_(event), active_(true) {}
+
+BuildOwner::TimelineSpan::~TimelineSpan() {
+  if (active_) {
+    owner_->finish_timeline(recorder_, event_, TimelineOutcome::failed);
+  }
+}
+
+BuildOwner::TimelineSpan::TimelineSpan(TimelineSpan&& other) noexcept
+  : owner_(std::exchange(other.owner_, nullptr)), recorder_(std::move(other.recorder_)),
+    event_(other.event_), active_(std::exchange(other.active_, false)) {}
+
+void BuildOwner::TimelineSpan::complete() noexcept {
+  if (active_) {
+    owner_->finish_timeline(recorder_, event_, TimelineOutcome::completed);
+    active_ = false;
+  }
+}
+
+void BuildOwner::TimelineSpan::fail() noexcept {
+  if (active_) {
+    owner_->finish_timeline(recorder_, event_, TimelineOutcome::failed);
+    active_ = false;
+  }
+}
+
+BuildOwner::TimelineSpan BuildOwner::begin_timeline(TimelinePhase phase,
+                                                    std::uint64_t parent_span_id,
+                                                    std::uint64_t frame_id, std::size_t pass,
+                                                    std::size_t work_count) noexcept {
+  const std::shared_ptr<TimelineRecorder> recorder = timeline_recorder_;
+  if (recorder == nullptr) {
+    return {};
+  }
+  return TimelineSpan{*this, recorder,
+                      recorder->begin(phase, parent_span_id, frame_id, pass, work_count)};
+}
+
+void BuildOwner::finish_timeline(const std::shared_ptr<TimelineRecorder>& recorder,
+                                 TimelineEvent event, TimelineOutcome outcome) noexcept {
+  recorder->finish(event, outcome);
+}
+
+std::uint64_t BuildOwner::next_timeline_frame_id() noexcept {
+  return timeline_recorder_ == nullptr ? 0 : timeline_recorder_->next_frame_id();
+}
+
+void BuildOwner::set_timeline_recorder(std::shared_ptr<TimelineRecorder> recorder) {
+  if (reconciling_ || framing_) {
+    throw std::logic_error(
+      "BuildOwner cannot change its timeline recorder during reconciliation or framing");
+  }
+  timeline_recorder_ = std::move(recorder);
+}
+
 std::unique_ptr<Element> BuildOwner::make_element(TypeToken type, Key key, std::string debug_name,
                                                   Element* parent) {
   const auto id = next_id_++;
@@ -150,11 +318,14 @@ Element* BuildOwner::resolve(Element::Id id, std::uint64_t generation) const {
   return found->second;
 }
 
-void BuildOwner::flush() {
+void BuildOwner::flush() { flush_with_timeline(0, 0); }
+
+void BuildOwner::flush_with_timeline(std::uint64_t parent_span_id, std::uint64_t frame_id) {
   if (reconciling_) {
     throw std::logic_error("BuildOwner does not allow reentrant render or flush");
   }
   reconciling_ = true;
+  auto timeline = begin_timeline(TimelinePhase::build, parent_span_id, frame_id, 0, dirty_.size());
   try {
     while (!dirty_.empty()) {
       std::vector<Element::Id> pending{dirty_.begin(), dirty_.end()};
@@ -177,8 +348,10 @@ void BuildOwner::flush() {
         element.rebuild_(element, *this);
       }
     }
+    timeline.complete();
     reconciling_ = false;
   } catch (...) {
+    timeline.fail();
     reconciling_ = false;
     throw;
   }
@@ -277,30 +450,57 @@ LayerTree BuildOwner::layer_frame(BoxConstraints viewport) {
     throw std::logic_error("BuildOwner does not allow reentrant frame production");
   }
   framing_ = true;
+  const std::uint64_t frame_id = next_timeline_frame_id();
+  auto frame_timeline = begin_timeline(TimelinePhase::frame, 0, frame_id, 0, 0);
   try {
-    flush();
+    flush_with_timeline(frame_timeline.id(), frame_id);
     constexpr std::size_t max_realization_rounds = 16;
     std::size_t realization_rounds = 0;
     for (;;) {
-      synchronize_render_tree();
-      render_owner_.layout(viewport);
+      {
+        auto timeline = begin_timeline(TimelinePhase::synchronize_render_tree, frame_timeline.id(),
+                                       frame_id, realization_rounds, 0);
+        synchronize_render_tree();
+        timeline.complete();
+      }
+      {
+        auto timeline = begin_timeline(TimelinePhase::layout, frame_timeline.id(), frame_id,
+                                       realization_rounds, render_owner_.pending_layout_count());
+        render_owner_.layout(viewport);
+        timeline.complete();
+      }
       if (!has_pending_lazy_children()) {
         break;
       }
       if (realization_rounds == max_realization_rounds) {
         throw std::logic_error("Lazy child layout did not stabilize");
       }
-      if (!realize_lazy_children()) {
-        throw std::logic_error("Lazy child request disappeared during realization");
+      {
+        auto timeline = begin_timeline(TimelinePhase::lazy_realization, frame_timeline.id(),
+                                       frame_id, realization_rounds, 1);
+        if (!realize_lazy_children()) {
+          throw std::logic_error("Lazy child request disappeared during realization");
+        }
+        timeline.complete();
       }
-      flush();
       ++realization_rounds;
+      frame_timeline.set_work_count(realization_rounds);
+      flush_with_timeline(frame_timeline.id(), frame_id);
     }
-    LayerTree result = render_owner_.composite_frame();
+    LayerTree result;
+    {
+      auto timeline = begin_timeline(TimelinePhase::composite, frame_timeline.id(), frame_id, 0,
+                                     render_owner_.pending_paint_count() +
+                                       render_owner_.pending_compositing_count());
+      result = render_owner_.composite_frame();
+      timeline.complete();
+    }
     last_viewport_ = viewport;
+    frame_timeline.complete();
     framing_ = false;
     return result;
   } catch (...) {
+    frame_timeline.fail();
     framing_ = false;
     throw;
   }

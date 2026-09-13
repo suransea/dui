@@ -1,6 +1,8 @@
 #include "dui/ui.hpp"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
@@ -655,6 +657,184 @@ void structured_inspector_is_detached_and_deterministic() {
   require(deep_json_rejected, "inspector serialized beyond its safe maximum depth");
 }
 
+class StepTimelineClock final : public dui::TimelineClock {
+public:
+  std::chrono::nanoseconds now() const noexcept override {
+    ++call_count_;
+    return std::chrono::nanoseconds{tick_++};
+  }
+
+  [[nodiscard]] std::size_t call_count() const { return call_count_; }
+
+private:
+  mutable std::int64_t tick_{};
+  mutable std::size_t call_count_{};
+};
+
+struct ThrowingTimelineComponent {
+  auto build(dui::BuildContext&) const -> dui::Text {
+    throw std::runtime_error("timeline build failure");
+  }
+};
+
+struct ReplaceTimelineDuringBuild {
+  dui::BuildOwner* owner;
+  std::shared_ptr<dui::TimelineRecorder> replacement;
+  bool* rejected;
+
+  auto build(dui::BuildContext&) const {
+    try {
+      owner->set_timeline_recorder(replacement);
+    } catch (const std::logic_error&) {
+      *rejected = true;
+    }
+    return dui::Text{"stable recorder"};
+  }
+};
+
+void timeline_recorder_is_deterministic_bounded_and_failure_safe() {
+  bool invalid_capacity_rejected = false;
+  try {
+    static_cast<void>(std::make_shared<dui::TimelineRecorder>(0));
+  } catch (const std::invalid_argument&) {
+    invalid_capacity_rejected = true;
+  }
+  require(invalid_capacity_rejected, "timeline recorder accepted zero capacity");
+  bool missing_clock_rejected = false;
+  try {
+    static_cast<void>(
+      std::make_shared<dui::TimelineRecorder>(1, std::shared_ptr<dui::TimelineClock>{}));
+  } catch (const std::invalid_argument&) {
+    missing_clock_rejected = true;
+  }
+  require(missing_clock_rejected, "timeline recorder accepted a null clock");
+
+  auto disabled_clock = std::make_shared<StepTimelineClock>();
+  {
+    dui::BuildOwner owner;
+    owner.set_timeline_recorder(std::make_shared<dui::TimelineRecorder>(4, disabled_clock));
+    owner.set_timeline_recorder(nullptr);
+    owner.render(dui::Text{"unrecorded"});
+    static_cast<void>(owner.frame(dui::BoxConstraints::tight({80.0, 16.0})));
+  }
+  require(disabled_clock->call_count() == 0,
+          "an unattached timeline clock was read by the disabled path");
+
+  auto clock = std::make_shared<StepTimelineClock>();
+  auto recorder = std::make_shared<dui::TimelineRecorder>(32, clock);
+  dui::TimelineSnapshot detached;
+  {
+    dui::BuildOwner owner;
+    owner.set_timeline_recorder(recorder);
+    owner.render(dui::Text{"timeline"});
+    const auto first_tree = owner.layer_frame(dui::BoxConstraints::tight({80.0, 16.0}));
+    dui::BuildOwner unrecorded_owner;
+    unrecorded_owner.render(dui::Text{"timeline"});
+    const auto unrecorded_tree =
+      unrecorded_owner.layer_frame(dui::BoxConstraints::tight({80.0, 16.0}));
+    require(first_tree.dump() == unrecorded_tree.dump(),
+            "timeline recording changed retained frame output");
+
+    const auto snapshot = recorder->snapshot();
+    require(snapshot.events.size() == 6 && snapshot.dropped_event_count == 0,
+            "basic timeline did not record the exact UI operation set");
+    const std::array expected_phases{
+      dui::TimelinePhase::reconcile, dui::TimelinePhase::frame,
+      dui::TimelinePhase::build,     dui::TimelinePhase::synchronize_render_tree,
+      dui::TimelinePhase::layout,    dui::TimelinePhase::composite};
+    const auto frame_id = snapshot.events[1].frame_id;
+    const auto frame_span_id = snapshot.events[1].span_id;
+    for (std::size_t index = 0; index < snapshot.events.size(); ++index) {
+      const auto& event = snapshot.events[index];
+      require(event.sequence == index + 1 && event.phase == expected_phases[index] &&
+                event.outcome == dui::TimelineOutcome::completed &&
+                event.duration > std::chrono::nanoseconds::zero(),
+              "basic timeline order, outcome, or fake-clock duration was incorrect");
+      if (index >= 2) {
+        require(event.parent_span_id == frame_span_id && event.frame_id == frame_id,
+                "frame phase was not correlated with its parent span");
+      }
+    }
+    require(snapshot.events[0].parent_span_id == 0 && snapshot.events[0].frame_id == 0 &&
+              snapshot.events[1].parent_span_id == 0 && frame_id != 0 &&
+              snapshot.events[1].duration == std::chrono::nanoseconds{9},
+            "root timeline correlation or deterministic frame timing was incorrect");
+
+    recorder->clear();
+    const auto clean_tree = owner.layer_frame(dui::BoxConstraints::tight({80.0, 16.0}));
+    const auto clean = recorder->snapshot();
+    require(
+      clean.events.size() == 5 && first_tree.root() == clean_tree.root() &&
+        clean.events[0].phase == dui::TimelinePhase::frame && clean.events[0].work_count == 0 &&
+        clean.events[3].phase == dui::TimelinePhase::layout && clean.events[3].work_count == 0 &&
+        clean.events[4].phase == dui::TimelinePhase::composite && clean.events[4].work_count == 0,
+      "timeline changed or misreported a retained clean frame");
+    const std::uint64_t last_clean_sequence = clean.events.back().sequence;
+
+    recorder->clear();
+    bool original_failure_preserved = false;
+    try {
+      owner.render(ThrowingTimelineComponent{});
+    } catch (const std::runtime_error& error) {
+      original_failure_preserved = std::string{error.what()} == "timeline build failure";
+    }
+    require(original_failure_preserved, "timeline replaced a reconciliation exception");
+    owner.render(dui::Text{"recovered"});
+    auto recovery = recorder->snapshot();
+    require(recovery.events.size() == 2 && recovery.events[0].sequence == last_clean_sequence + 1 &&
+              recovery.events[0].outcome == dui::TimelineOutcome::failed &&
+              recovery.events[1].sequence == last_clean_sequence + 2 &&
+              recovery.events[1].outcome == dui::TimelineOutcome::completed,
+            "timeline did not close a failed span or recover without reusing IDs");
+
+    std::optional<dui::StateHandle<int>> state;
+    owner.render(Counter{&state});
+    recorder->clear();
+    state->set(4);
+    owner.flush();
+    const auto dirty = recorder->snapshot();
+    require(dirty.events.size() == 1 && dirty.events.front().phase == dui::TimelinePhase::build &&
+              dirty.events.front().work_count == 1,
+            "timeline omitted the pending dirty-build work count");
+
+    auto replacement_clock = std::make_shared<StepTimelineClock>();
+    auto replacement = std::make_shared<dui::TimelineRecorder>(4, replacement_clock);
+    bool replacement_rejected = false;
+    owner.render(ReplaceTimelineDuringBuild{&owner, replacement, &replacement_rejected});
+    require(replacement_rejected && replacement->snapshot().events.empty(),
+            "timeline recorder changed during reconciliation");
+    detached = recorder->snapshot();
+  }
+  recorder.reset();
+  require(!detached.events.empty() && detached.events.back().phase == dui::TimelinePhase::reconcile,
+          "timeline snapshot retained recorder- or owner-dependent storage");
+
+  auto bounded_clock = std::make_shared<StepTimelineClock>();
+  auto bounded = std::make_shared<dui::TimelineRecorder>(2, bounded_clock);
+  dui::BuildOwner bounded_owner;
+  bounded_owner.set_timeline_recorder(bounded);
+  bounded_owner.render(dui::Text{"one"});
+  bounded_owner.render(dui::Text{"two"});
+  bounded_owner.render(dui::Text{"three"});
+  auto overflow = bounded->snapshot();
+  require(overflow.events.size() == 2 && overflow.events[0].sequence == 2 &&
+            overflow.events[1].sequence == 3 && overflow.dropped_event_count == 1,
+          "timeline ring did not retain the newest completed events");
+  bounded->clear();
+  bounded_owner.render(dui::Text{"four"});
+  overflow = bounded->snapshot();
+  require(overflow.events.size() == 1 && overflow.events[0].sequence == 4 &&
+            overflow.dropped_event_count == 0,
+          "timeline clear reused IDs or retained its dropped-event count");
+  bounded->clear();
+  static_cast<void>(bounded_owner.frame(dui::BoxConstraints::tight({80.0, 16.0})));
+  overflow = bounded->snapshot();
+  require(overflow.events.size() == 2 && overflow.events[0].phase == dui::TimelinePhase::frame &&
+            overflow.events[1].phase == dui::TimelinePhase::composite &&
+            overflow.dropped_event_count == 3,
+          "timeline ring did not evict nested spans by completion before start-order sorting");
+}
+
 void duplicate_keys_are_rejected() {
   dui::BuildOwner owner;
   owner.render(ItemList{{{1, "original"}}});
@@ -694,6 +874,7 @@ int main() {
     state_handle_rejects_destroyed_owner();
     tree_dump_is_deterministic();
     structured_inspector_is_detached_and_deterministic();
+    timeline_recorder_is_deterministic_bounded_and_failure_safe();
     duplicate_keys_are_rejected();
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';

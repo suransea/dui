@@ -1282,10 +1282,13 @@ template <class V> void BuildOwner::render(const V& view) {
     throw std::logic_error("BuildOwner does not allow reentrant render or flush");
   }
   reconciling_ = true;
+  auto timeline = begin_timeline(TimelinePhase::reconcile, 0, 0, 0, 1);
   try {
     reconcile_child(root_, view, *this, nullptr, Key{});
+    timeline.complete();
     reconciling_ = false;
   } catch (...) {
+    timeline.fail();
     reconciling_ = false;
     throw;
   }
