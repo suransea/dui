@@ -159,6 +159,13 @@ private:
   DisplayList display_list_;
 };
 
+class BuildOwner;
+class RasterThread;
+
+namespace detail {
+struct TimelineFlowToken final {};
+} // namespace detail
+
 class LayerTree {
 public:
   LayerTree() = default;
@@ -166,16 +173,27 @@ public:
 
   [[nodiscard]] Size frame_size() const { return frame_size_; }
   [[nodiscard]] const LayerPtr& root() const { return root_; }
+  [[nodiscard]] std::uint64_t timeline_flow_id() const { return timeline_flow_id_; }
   [[nodiscard]] DisplayList flatten() const;
   [[nodiscard]] std::string dump() const;
 
 private:
+  friend class BuildOwner;
+  friend class RasterThread;
+
+  [[nodiscard]] LayerTree
+  with_timeline_flow(const std::shared_ptr<const detail::TimelineFlowToken>& token,
+                     std::uint64_t flow_id) const;
+  [[nodiscard]] bool
+  timeline_flow_matches(const std::shared_ptr<const detail::TimelineFlowToken>& token) const;
+
   Size frame_size_{};
   LayerPtr root_;
+  std::weak_ptr<const detail::TimelineFlowToken> timeline_flow_token_;
+  std::uint64_t timeline_flow_id_{};
 };
 
 class RenderOwner;
-class BuildOwner;
 class RenderObject;
 class RenderBox;
 class RenderSliver;

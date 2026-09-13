@@ -173,10 +173,11 @@ public:
   class TimelineSpan {
   public:
     TimelineSpan(std::shared_ptr<TimelineRecorder> recorder, TimelinePhase phase,
-                 std::uint64_t parent_span_id, std::uint64_t frame_id)
+                 std::uint64_t parent_span_id, std::uint64_t frame_id, std::uint64_t flow_id)
       : recorder_(std::move(recorder)) {
       if (recorder_ != nullptr) {
-        event_ = recorder_->begin(TimelineLane::raster, phase, parent_span_id, frame_id, 0, 1);
+        event_ =
+          recorder_->begin(TimelineLane::raster, phase, parent_span_id, frame_id, flow_id, 0, 1);
       }
     }
 
@@ -325,14 +326,19 @@ private:
         state->rendering = true;
       }
 
+      const std::uint64_t flow_id =
+        state->timeline_recorder != nullptr &&
+            submission.layer_tree.timeline_flow_matches(state->timeline_recorder->flow_token())
+          ? submission.layer_tree.timeline_flow_id()
+          : 0;
       TimelineSpan raster_timeline{state->timeline_recorder, TimelinePhase::raster_frame, 0,
-                                   submission.id};
+                                   submission.id, flow_id};
       FrameOutcome outcome = FrameOutcome::failed;
       try {
         std::unique_ptr<SurfaceFrame> frame;
         {
           TimelineSpan acquire_timeline{state->timeline_recorder, TimelinePhase::surface_acquire,
-                                        raster_timeline.id(), submission.id};
+                                        raster_timeline.id(), submission.id, flow_id};
           SurfaceAcquisition acquisition = state->surface->acquire(submission.request);
           switch (acquisition.status()) {
           case SurfaceAcquireStatus::ready:
@@ -358,12 +364,12 @@ private:
         if (frame != nullptr) {
           {
             TimelineSpan render_timeline{state->timeline_recorder, TimelinePhase::rasterize,
-                                         raster_timeline.id(), submission.id};
+                                         raster_timeline.id(), submission.id, flow_id};
             renderer->render(*frame, submission.layer_tree, submission.request);
             render_timeline.finish(TimelineOutcome::completed);
           }
           TimelineSpan present_timeline{state->timeline_recorder, TimelinePhase::surface_present,
-                                        raster_timeline.id(), submission.id};
+                                        raster_timeline.id(), submission.id, flow_id};
           switch (frame->present()) {
           case SurfaceFrameDelegate::PresentStatus::presented:
             present_timeline.finish(TimelineOutcome::completed);

@@ -35,7 +35,8 @@ public:
 
   [[nodiscard]] TimelineEvent begin(TimelineLane lane, TimelinePhase phase,
                                     std::uint64_t parent_span_id, std::uint64_t frame_id,
-                                    std::size_t pass, std::size_t work_count) noexcept {
+                                    std::uint64_t flow_id, std::size_t pass,
+                                    std::size_t work_count) noexcept {
     std::uint64_t sequence;
     std::uint64_t span_id;
     {
@@ -49,8 +50,8 @@ public:
       start = clock_->now();
     }
     return TimelineEvent{
-      sequence, span_id, parent_span_id, frame_id,  lane, phase, TimelineOutcome::completed,
-      start,    {},      pass,           work_count};
+      sequence, span_id, parent_span_id, frame_id,   lane,   phase, TimelineOutcome::completed,
+      start,    {},      pass,           work_count, flow_id};
   }
 
   void finish(TimelineEvent event, TimelineOutcome outcome) noexcept {
@@ -98,6 +99,15 @@ public:
     return next_nonzero(next_frame_id_);
   }
 
+  [[nodiscard]] std::uint64_t next_flow_id() noexcept {
+    std::lock_guard lock{state_mutex_};
+    return next_nonzero(next_flow_id_);
+  }
+
+  [[nodiscard]] std::shared_ptr<const detail::TimelineFlowToken> flow_token() const noexcept {
+    return flow_token_;
+  }
+
 private:
   static std::uint64_t next_nonzero(std::uint64_t& value) noexcept {
     std::uint64_t result = value++;
@@ -109,6 +119,8 @@ private:
 
   std::vector<TimelineEvent> events_;
   std::shared_ptr<TimelineClock> clock_;
+  std::shared_ptr<const detail::TimelineFlowToken> flow_token_{
+    std::make_shared<const detail::TimelineFlowToken>()};
   mutable std::mutex state_mutex_;
   mutable std::mutex clock_mutex_;
   std::size_t first_event_{};
@@ -117,6 +129,7 @@ private:
   std::uint64_t next_sequence_{1};
   std::uint64_t next_span_id_{1};
   std::uint64_t next_frame_id_{1};
+  std::uint64_t next_flow_id_{1};
 };
 
 TimelineRecorder::TimelineRecorder(std::size_t capacity)
@@ -133,8 +146,9 @@ void TimelineRecorder::clear() noexcept { impl_->clear(); }
 
 TimelineEvent TimelineRecorder::begin(TimelineLane lane, TimelinePhase phase,
                                       std::uint64_t parent_span_id, std::uint64_t frame_id,
-                                      std::size_t pass, std::size_t work_count) noexcept {
-  return impl_->begin(lane, phase, parent_span_id, frame_id, pass, work_count);
+                                      std::uint64_t flow_id, std::size_t pass,
+                                      std::size_t work_count) noexcept {
+  return impl_->begin(lane, phase, parent_span_id, frame_id, flow_id, pass, work_count);
 }
 
 void TimelineRecorder::finish(TimelineEvent event, TimelineOutcome outcome) noexcept {
@@ -142,6 +156,12 @@ void TimelineRecorder::finish(TimelineEvent event, TimelineOutcome outcome) noex
 }
 
 std::uint64_t TimelineRecorder::next_frame_id() noexcept { return impl_->next_frame_id(); }
+
+std::uint64_t TimelineRecorder::next_flow_id() noexcept { return impl_->next_flow_id(); }
+
+std::shared_ptr<const detail::TimelineFlowToken> TimelineRecorder::flow_token() const noexcept {
+  return impl_->flow_token();
+}
 
 struct BuildOwner::PointerTapRoute final : GestureArenaMember {
   explicit PointerTapRoute(std::vector<RenderObject::Id> value) : route(std::move(value)) {}
@@ -249,7 +269,8 @@ void BuildOwner::TimelineSpan::fail() noexcept {
 
 BuildOwner::TimelineSpan BuildOwner::begin_timeline(TimelinePhase phase,
                                                     std::uint64_t parent_span_id,
-                                                    std::uint64_t frame_id, std::size_t pass,
+                                                    std::uint64_t frame_id, std::uint64_t flow_id,
+                                                    std::size_t pass,
                                                     std::size_t work_count) noexcept {
   const std::shared_ptr<TimelineRecorder> recorder = timeline_recorder_;
   if (recorder == nullptr) {
@@ -257,7 +278,7 @@ BuildOwner::TimelineSpan BuildOwner::begin_timeline(TimelinePhase phase,
   }
   return TimelineSpan{
     *this, recorder,
-    recorder->begin(TimelineLane::ui, phase, parent_span_id, frame_id, pass, work_count)};
+    recorder->begin(TimelineLane::ui, phase, parent_span_id, frame_id, flow_id, pass, work_count)};
 }
 
 void BuildOwner::finish_timeline(const std::shared_ptr<TimelineRecorder>& recorder,
@@ -267,6 +288,10 @@ void BuildOwner::finish_timeline(const std::shared_ptr<TimelineRecorder>& record
 
 std::uint64_t BuildOwner::next_timeline_frame_id() noexcept {
   return timeline_recorder_ == nullptr ? 0 : timeline_recorder_->next_frame_id();
+}
+
+std::uint64_t BuildOwner::next_timeline_flow_id() noexcept {
+  return timeline_recorder_ == nullptr ? 0 : timeline_recorder_->next_flow_id();
 }
 
 void BuildOwner::set_timeline_recorder(std::shared_ptr<TimelineRecorder> recorder) {
@@ -344,14 +369,16 @@ Element* BuildOwner::resolve(Element::Id id, std::uint64_t generation) const {
   return found->second;
 }
 
-void BuildOwner::flush() { flush_with_timeline(0, 0); }
+void BuildOwner::flush() { flush_with_timeline(0, 0, 0); }
 
-void BuildOwner::flush_with_timeline(std::uint64_t parent_span_id, std::uint64_t frame_id) {
+void BuildOwner::flush_with_timeline(std::uint64_t parent_span_id, std::uint64_t frame_id,
+                                     std::uint64_t flow_id) {
   if (reconciling_) {
     throw std::logic_error("BuildOwner does not allow reentrant render or flush");
   }
   reconciling_ = true;
-  auto timeline = begin_timeline(TimelinePhase::build, parent_span_id, frame_id, 0, dirty_.size());
+  auto timeline =
+    begin_timeline(TimelinePhase::build, parent_span_id, frame_id, flow_id, 0, dirty_.size());
   try {
     while (!dirty_.empty()) {
       std::vector<Element::Id> pending{dirty_.begin(), dirty_.end()};
@@ -477,21 +504,23 @@ LayerTree BuildOwner::layer_frame(BoxConstraints viewport) {
   }
   framing_ = true;
   const std::uint64_t frame_id = next_timeline_frame_id();
-  auto frame_timeline = begin_timeline(TimelinePhase::frame, 0, frame_id, 0, 0);
+  const std::uint64_t flow_id = next_timeline_flow_id();
+  auto frame_timeline = begin_timeline(TimelinePhase::frame, 0, frame_id, flow_id, 0, 0);
   try {
-    flush_with_timeline(frame_timeline.id(), frame_id);
+    flush_with_timeline(frame_timeline.id(), frame_id, flow_id);
     constexpr std::size_t max_realization_rounds = 16;
     std::size_t realization_rounds = 0;
     for (;;) {
       {
         auto timeline = begin_timeline(TimelinePhase::synchronize_render_tree, frame_timeline.id(),
-                                       frame_id, realization_rounds, 0);
+                                       frame_id, flow_id, realization_rounds, 0);
         synchronize_render_tree();
         timeline.complete();
       }
       {
-        auto timeline = begin_timeline(TimelinePhase::layout, frame_timeline.id(), frame_id,
-                                       realization_rounds, render_owner_.pending_layout_count());
+        auto timeline =
+          begin_timeline(TimelinePhase::layout, frame_timeline.id(), frame_id, flow_id,
+                         realization_rounds, render_owner_.pending_layout_count());
         render_owner_.layout(viewport);
         timeline.complete();
       }
@@ -503,7 +532,7 @@ LayerTree BuildOwner::layer_frame(BoxConstraints viewport) {
       }
       {
         auto timeline = begin_timeline(TimelinePhase::lazy_realization, frame_timeline.id(),
-                                       frame_id, realization_rounds, 1);
+                                       frame_id, flow_id, realization_rounds, 1);
         if (!realize_lazy_children()) {
           throw std::logic_error("Lazy child request disappeared during realization");
         }
@@ -511,15 +540,18 @@ LayerTree BuildOwner::layer_frame(BoxConstraints viewport) {
       }
       ++realization_rounds;
       frame_timeline.set_work_count(realization_rounds);
-      flush_with_timeline(frame_timeline.id(), frame_id);
+      flush_with_timeline(frame_timeline.id(), frame_id, flow_id);
     }
     LayerTree result;
     {
-      auto timeline = begin_timeline(TimelinePhase::composite, frame_timeline.id(), frame_id, 0,
-                                     render_owner_.pending_paint_count() +
-                                       render_owner_.pending_compositing_count());
+      auto timeline = begin_timeline(
+        TimelinePhase::composite, frame_timeline.id(), frame_id, flow_id, 0,
+        render_owner_.pending_paint_count() + render_owner_.pending_compositing_count());
       result = render_owner_.composite_frame();
       timeline.complete();
+    }
+    if (flow_id != 0) {
+      result = result.with_timeline_flow(timeline_recorder_->flow_token(), flow_id);
     }
     last_viewport_ = viewport;
     frame_timeline.complete();
@@ -945,7 +977,10 @@ std::string TimelineSnapshot::to_json() const {
         event.phase == TimelinePhase::surface_present ||
         event.outcome == TimelineOutcome::unavailable ||
         event.outcome == TimelineOutcome::out_of_date || event.outcome == TimelineOutcome::lost) {
-      version = 2;
+      version = std::max(version, std::size_t{2});
+    }
+    if (event.flow_id != 0) {
+      version = 3;
     }
   }
   std::ostringstream output;
@@ -958,8 +993,11 @@ std::string TimelineSnapshot::to_json() const {
       output << ',';
     }
     output << "{\"sequence\":" << event.sequence << ",\"spanId\":" << event.span_id
-           << ",\"parentSpanId\":" << event.parent_span_id << ",\"frameId\":" << event.frame_id
-           << ",\"lane\":";
+           << ",\"parentSpanId\":" << event.parent_span_id << ",\"frameId\":" << event.frame_id;
+    if (version == 3) {
+      output << ",\"flowId\":" << event.flow_id;
+    }
+    output << ",\"lane\":";
     append_json_string(output, timeline_lane_name(event.lane));
     output << ",\"phase\":";
     append_json_string(output, timeline_phase_name(event.phase));

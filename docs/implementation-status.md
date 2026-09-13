@@ -318,8 +318,9 @@ technology observation remain target-OS work.
 
 ## M4: Tooling and Platforms
 
-Status: structured-inspector, concurrent UI/raster timeline collection, and
-canonical timeline serialization slices implemented and verified.
+Status: structured-inspector, concurrent UI/raster timeline collection,
+cross-lane flow correlation, and canonical timeline serialization slices
+implemented and verified.
 
 `BuildOwner::inspect()` now captures an owned, passive Element-tree snapshot.
 Each node records stable identity/generation, depth, name/value/key, active or
@@ -376,6 +377,20 @@ selects version 2 for the new raster vocabulary. Tests cover exact successful
 hierarchy and fake-clock timing, transient acquisition, acquire/present loss,
 present out-of-date, renderer failure, queued cancellation, disabled recording,
 and concurrent UI/raster recording with snapshot, clear, and serialization.
+
+The cross-lane correlation slice assigns each recorded UI frame a recorder-local
+flow ID and returns a `LayerTree` carrying that ID with weak opaque recorder
+provenance. Every nested UI frame phase shares the flow. A `RasterThread` using
+the same recorder propagates it through raster root/acquire/render/present
+events; different recorders, expired provenance, and unrecorded trees produce
+zero-flow raster events. `frameId` remains lane-local and raster frame IDs still
+equal ticket IDs. RenderOwner caches remain untagged, so clean frames reuse the
+same immutable root layer while receiving fresh flows and older trees remain
+unchanged. LayerTrees do not retain recorders. Canonical JSON keeps zero-flow
+version-1/version-2 bytes unchanged and emits a fixed `flowId` field for every
+event in version 3. Tests cover matching and mismatched recorder paths, clean
+root reuse, standalone zero-flow operations, old-tree immutability, recorder
+lifetime, mixed-flow serialization, and concurrent propagation.
 
 ## Verification
 

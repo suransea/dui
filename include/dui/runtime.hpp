@@ -278,6 +278,7 @@ struct TimelineEvent {
   std::chrono::nanoseconds duration{};
   std::size_t pass{};
   std::size_t work_count{};
+  std::uint64_t flow_id{};
 
   friend bool operator==(const TimelineEvent&, const TimelineEvent&) = default;
 };
@@ -318,9 +319,12 @@ private:
 
   [[nodiscard]] TimelineEvent begin(TimelineLane lane, TimelinePhase phase,
                                     std::uint64_t parent_span_id, std::uint64_t frame_id,
-                                    std::size_t pass, std::size_t work_count) noexcept;
+                                    std::uint64_t flow_id, std::size_t pass,
+                                    std::size_t work_count) noexcept;
   void finish(TimelineEvent event, TimelineOutcome outcome) noexcept;
   [[nodiscard]] std::uint64_t next_frame_id() noexcept;
+  [[nodiscard]] std::uint64_t next_flow_id() noexcept;
+  [[nodiscard]] std::shared_ptr<const detail::TimelineFlowToken> flow_token() const noexcept;
 
   std::unique_ptr<Impl> impl_;
 };
@@ -417,16 +421,18 @@ private:
   [[nodiscard]] Element* resolve(Element::Id id, std::uint64_t generation) const;
   void clear_dependencies(Element& element);
   void synchronize_render_tree();
-  void flush_with_timeline(std::uint64_t parent_span_id, std::uint64_t frame_id);
+  void flush_with_timeline(std::uint64_t parent_span_id, std::uint64_t frame_id,
+                           std::uint64_t flow_id);
   [[nodiscard]] bool has_pending_lazy_children() const;
   [[nodiscard]] bool realize_lazy_children();
   void forget_dependency(Element::Id id, std::uint64_t generation, DependencySource& dependency);
   [[nodiscard]] TimelineSpan begin_timeline(TimelinePhase phase, std::uint64_t parent_span_id,
-                                            std::uint64_t frame_id, std::size_t pass,
-                                            std::size_t work_count) noexcept;
+                                            std::uint64_t frame_id, std::uint64_t flow_id,
+                                            std::size_t pass, std::size_t work_count) noexcept;
   void finish_timeline(const std::shared_ptr<TimelineRecorder>& recorder, TimelineEvent event,
                        TimelineOutcome outcome) noexcept;
   [[nodiscard]] std::uint64_t next_timeline_frame_id() noexcept;
+  [[nodiscard]] std::uint64_t next_timeline_flow_id() noexcept;
 
   template <class T>
   [[nodiscard]] T& state(Element::Id id, std::uint64_t generation, std::uint64_t slot);

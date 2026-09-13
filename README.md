@@ -66,7 +66,9 @@ composition, surface acquisition, rasterization, and presentation. Callers can
 inject a monotonic clock for deterministic profiling and safely snapshot or
 clear the recorder across those threads. Detached snapshots serialize to
 versioned, canonical, locale-independent JSON without reducing nanosecond
-timestamps to floating point.
+timestamps to floating point. Recorded `LayerTree` values carry a weak,
+non-owning provenance token so matching raster work shares a cross-lane flow ID
+without conflating UI frame IDs with raster ticket IDs.
 
 Implemented layout Views include `VStack`, `HStack`, `Stack`, `Padding`,
 `ColoredBox`, `Viewport`, and `SliverToBoxAdapter`; primitives include `Text`

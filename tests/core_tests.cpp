@@ -734,8 +734,8 @@ void timeline_recorder_is_deterministic_bounded_and_failure_safe() {
     unrecorded_owner.render(dui::Text{"timeline"});
     const auto unrecorded_tree =
       unrecorded_owner.layer_frame(dui::BoxConstraints::tight({80.0, 16.0}));
-    require(first_tree.dump() == unrecorded_tree.dump(),
-            "timeline recording changed retained frame output");
+    require(first_tree.dump() == unrecorded_tree.dump() && unrecorded_tree.timeline_flow_id() == 0,
+            "timeline recording changed retained frame output or unrecorded metadata");
 
     const auto snapshot = recorder->snapshot();
     require(snapshot.events.size() == 6 && snapshot.dropped_event_count == 0,
@@ -746,6 +746,7 @@ void timeline_recorder_is_deterministic_bounded_and_failure_safe() {
       dui::TimelinePhase::layout,    dui::TimelinePhase::composite};
     const auto frame_id = snapshot.events[1].frame_id;
     const auto frame_span_id = snapshot.events[1].span_id;
+    const auto first_flow_id = snapshot.events[1].flow_id;
     for (std::size_t index = 0; index < snapshot.events.size(); ++index) {
       const auto& event = snapshot.events[index];
       require(event.sequence == index + 1 && event.phase == expected_phases[index] &&
@@ -756,10 +757,13 @@ void timeline_recorder_is_deterministic_bounded_and_failure_safe() {
         require(event.parent_span_id == frame_span_id && event.frame_id == frame_id,
                 "frame phase was not correlated with its parent span");
       }
+      require(index == 0 ? event.flow_id == 0 : event.flow_id == first_flow_id,
+              "UI timeline event had an incorrect cross-lane flow ID");
     }
     require(snapshot.events[0].parent_span_id == 0 && snapshot.events[0].frame_id == 0 &&
               snapshot.events[1].parent_span_id == 0 && frame_id != 0 &&
-              snapshot.events[1].duration == std::chrono::nanoseconds{9},
+              snapshot.events[1].duration == std::chrono::nanoseconds{9} && first_flow_id != 0 &&
+              first_tree.timeline_flow_id() == first_flow_id,
             "root timeline correlation or deterministic frame timing was incorrect");
 
     recorder->clear();
@@ -768,6 +772,9 @@ void timeline_recorder_is_deterministic_bounded_and_failure_safe() {
     require(
       clean.events.size() == 5 && first_tree.root() == clean_tree.root() &&
         clean.events[0].phase == dui::TimelinePhase::frame && clean.events[0].work_count == 0 &&
+        clean.events[0].flow_id == clean_tree.timeline_flow_id() &&
+        clean_tree.timeline_flow_id() != first_flow_id &&
+        first_tree.timeline_flow_id() == first_flow_id &&
         clean.events[3].phase == dui::TimelinePhase::layout && clean.events[3].work_count == 0 &&
         clean.events[4].phase == dui::TimelinePhase::composite && clean.events[4].work_count == 0,
       "timeline changed or misreported a retained clean frame");
@@ -796,7 +803,7 @@ void timeline_recorder_is_deterministic_bounded_and_failure_safe() {
     owner.flush();
     const auto dirty = recorder->snapshot();
     require(dirty.events.size() == 1 && dirty.events.front().phase == dui::TimelinePhase::build &&
-              dirty.events.front().work_count == 1,
+              dirty.events.front().work_count == 1 && dirty.events.front().flow_id == 0,
             "timeline omitted the pending dirty-build work count");
 
     auto replacement_clock = std::make_shared<StepTimelineClock>();
@@ -966,6 +973,23 @@ void timeline_json_is_canonical_and_strict() {
         raster_json.contains("\"outcome\":\"" + std::string{raster_outcome_names[index]} + '"'),
       "timeline JSON omitted a version-2 phase or outcome spelling");
   }
+
+  dui::TimelineEvent flowed_event;
+  flowed_event.sequence = 1;
+  flowed_event.span_id = 1;
+  flowed_event.frame_id = 2;
+  flowed_event.flow_id = std::numeric_limits<std::uint64_t>::max();
+  dui::TimelineEvent zero_flow_raster;
+  zero_flow_raster.sequence = 2;
+  zero_flow_raster.span_id = 2;
+  zero_flow_raster.lane = dui::TimelineLane::raster;
+  zero_flow_raster.phase = dui::TimelinePhase::raster_frame;
+  const dui::TimelineSnapshot flowed{{flowed_event, zero_flow_raster}, 0};
+  const std::string flowed_json = flowed.to_json();
+  require(flowed_json.starts_with("{\"version\":3") &&
+            flowed_json.contains("\"frameId\":2,\"flowId\":18446744073709551615,\"lane\":") &&
+            flowed_json.contains("\"frameId\":0,\"flowId\":0,\"lane\":"),
+          "timeline JSON did not emit fixed version-3 flow fields for a mixed snapshot");
 
   const auto rejects = [](dui::TimelineSnapshot malformed) {
     try {

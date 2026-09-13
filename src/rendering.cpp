@@ -283,6 +283,24 @@ LayerTree::LayerTree(Size frame_size, LayerPtr root)
   }
 }
 
+LayerTree
+LayerTree::with_timeline_flow(const std::shared_ptr<const detail::TimelineFlowToken>& token,
+                              std::uint64_t flow_id) const {
+  if (token == nullptr || flow_id == 0) {
+    throw std::invalid_argument("LayerTree timeline flow requires a token and nonzero ID");
+  }
+  LayerTree result = *this;
+  result.timeline_flow_token_ = token;
+  result.timeline_flow_id_ = flow_id;
+  return result;
+}
+
+bool LayerTree::timeline_flow_matches(
+  const std::shared_ptr<const detail::TimelineFlowToken>& token) const {
+  return token != nullptr && !timeline_flow_token_.owner_before(token) &&
+         !token.owner_before(timeline_flow_token_);
+}
+
 DisplayList LayerTree::flatten() const {
   DisplayListBuilder builder;
   if (root_ != nullptr) {

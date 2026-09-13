@@ -717,6 +717,33 @@ exit; ticket/frame and parent correlation; concurrent UI/raster collection,
 snapshot, and clear; disabled behavior; canonical version selection; and
 ThreadSanitizer execution without races or deadlock.
 
+The cross-lane correlation slice adds a recorder-local nonzero `flowId` to
+timeline events. A recorded `BuildOwner::layer_frame()` allocates one flow,
+applies it to the UI frame and every nested frame phase, and returns a new
+`LayerTree` value carrying that flow plus weak opaque recorder provenance.
+`RenderOwner` continues to cache an untagged rendering snapshot: clean frames
+reuse the same immutable root layer but receive distinct flows, and older trees
+retain their original scalar flow. Reconciliation and standalone flush events
+remain uncorrelated with flow zero.
+
+`RasterThread` propagates a submitted tree's flow to its raster root and children
+only when the tree's weak provenance token matches the recorder fixed to that
+raster thread. A different recorder, an expired token, or an ordinary manually
+constructed tree produces raster events with flow zero. The weak token is never
+serialized or publicly exposed and does not retain the source recorder. Flow IDs
+are meaningful only inside snapshots from the matching recorder; `frameId`
+continues to identify the lane-local UI frame or raster ticket, while
+`parentSpanId` continues to express nesting rather than asynchronous causality.
+
+`flowId` is appended to the C++ event value to preserve positional source
+compatibility. Canonical JSON version 1 and version 2 bytes remain unchanged when
+every retained flow is zero. A snapshot containing any nonzero flow emits version
+3 and adds `flowId` after `frameId` to every event, including zero for unrelated
+events in the same snapshot. Acceptance covers matching and mismatched recorder
+paths, unrecorded trees, all raster outcomes, clean-root reuse with fresh flows,
+old-tree immutability, recorder non-retention, standalone zero-flow events,
+mixed-flow version-3 field order, and concurrent propagation without torn IDs.
+
 ## Prototype acceptance criteria
 
 M0 is accepted when headless tests demonstrate:
