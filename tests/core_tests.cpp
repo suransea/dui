@@ -1444,6 +1444,142 @@ void timeline_json_is_canonical_and_strict() {
   require(rejects(malformed), "timeline JSON accepted a negative duration");
 }
 
+void tooling_report_html_is_safe_and_deterministic() {
+  const dui::ToolingReport empty;
+  const std::string empty_html = empty.to_html();
+  require(empty_html.starts_with("<!doctype html><html lang=\"en\">") &&
+            empty_html.ends_with("</body></html>") &&
+            empty_html.contains("Content-Security-Policy") &&
+            empty_html.contains("default-src 'none'; style-src 'unsafe-inline'") &&
+            empty_html.contains("@media(max-width:620px)") &&
+            empty_html.contains("No mounted Element tree.") &&
+            empty_html.contains("No retained timeline events."),
+          "empty tooling report was not a complete secure responsive document");
+
+  dui::InspectorSnapshot inspector;
+  inspector.mount_count = 7;
+  inspector.unmount_count = 2;
+  inspector.pending_build_count = 1;
+  inspector.root.emplace();
+  inspector.root->id = 9;
+  inspector.root->generation = 3;
+  inspector.root->name = "root<script>&\"'";
+  inspector.root->value = std::string{"line\n"} + static_cast<char>(0x80);
+  inspector.root->key = "<key>";
+  inspector.root->dirty = true;
+  inspector.root->has_focus_node = true;
+  inspector.root->focused = true;
+  inspector.root->state_slot_count = 2;
+  inspector.root->state_values = {{"visible", std::string{"<value>&"}}, {"failed", std::nullopt}};
+  inspector.root->render_object = dui::InspectorRenderSnapshot{
+    11, dui::InspectorRenderProtocol::box, true, false, true, true, 4, 5};
+  inspector.root->children.emplace_back();
+  inspector.root->children.back().id = 10;
+  inspector.root->children.back().name = "child";
+  inspector.root->children.back().state = dui::InspectorElementState::dormant_keep_alive;
+  inspector.root->children.back().has_focus_node = true;
+
+  dui::TimelineSnapshot timeline;
+  timeline.dropped_event_count = 4;
+  const std::array outcomes{dui::TimelineOutcome::completed, dui::TimelineOutcome::unavailable,
+                            dui::TimelineOutcome::out_of_date, dui::TimelineOutcome::lost,
+                            dui::TimelineOutcome::failed};
+  for (std::size_t index = 0; index < outcomes.size(); ++index) {
+    dui::TimelineEvent event;
+    event.sequence = outcomes.size() - index;
+    event.span_id = index + 20;
+    event.parent_span_id = index;
+    event.frame_id = 30 + index;
+    event.flow_id = 40 + index;
+    event.lane = index == 0 ? dui::TimelineLane::ui : dui::TimelineLane::raster;
+    event.phase = index == 0 ? dui::TimelinePhase::frame : dui::TimelinePhase::raster_frame;
+    event.outcome = outcomes[index];
+    event.start = std::chrono::nanoseconds{-1 + static_cast<std::int64_t>(index)};
+    event.duration = std::chrono::nanoseconds{static_cast<std::int64_t>(index)};
+    event.pass = index + 50;
+    event.work_count = index + 60;
+    timeline.events.push_back(event);
+  }
+  const dui::ToolingReport report{inspector, timeline};
+  const std::string html = report.to_html();
+  require(
+    html == report.to_html() && html.contains("<b>7</b><span>mounts</span>") &&
+      html.contains("<b>4</b><span>dropped events</span>") &&
+      html.contains("&quot;root&lt;script&gt;&amp;\\&quot;&#39;&quot;") &&
+      !html.contains("root<script>") && html.contains("&quot;line\\n\\ufffd&quot;") &&
+      html.contains("&quot;&lt;key&gt;&quot;") && html.contains("&quot;&lt;value&gt;&amp;&quot;") &&
+      html.contains("<em>unavailable</em>") &&
+      html.contains("Render #11</strong> box | layout 4 | paint 5 | flags L-C | boundary") &&
+      html.contains("badge focus\">focused") && html.contains("badge focusable\">focusable") &&
+      html.contains("badge dormant\">dormant") &&
+      html.find("<tr><td>5</td><td>ui</td>") < html.find("<tr><td>1</td><td>raster</td>") &&
+      html.contains("outcome-completed") && html.contains("outcome-unavailable") &&
+      html.contains("outcome-outOfDate") && html.contains("outcome-lost") &&
+      html.contains("outcome-failed") &&
+      html.contains("<td>24</td><td>4</td><td>34</td><td>44</td><td>54</td><td>64</td>"),
+    "tooling report lost snapshot order, metadata, escaping, state, render, or timeline data");
+
+  const std::locale previous_locale = std::locale();
+  std::string localized;
+  try {
+    std::locale::global(std::locale{previous_locale, new GroupedNumberPunctuation});
+    localized = report.to_html();
+    std::locale::global(previous_locale);
+  } catch (...) {
+    std::locale::global(previous_locale);
+    throw;
+  }
+  require(localized == html, "tooling report depended on the process numeric locale");
+
+  dui::ToolingReport deep;
+  deep.inspector.root.emplace();
+  dui::InspectorNode* cursor = &*deep.inspector.root;
+  for (std::size_t depth = 1; depth <= dui::InspectorSnapshot::maximum_depth; ++depth) {
+    cursor->children.emplace_back();
+    cursor = &cursor->children.back();
+  }
+  bool deep_rejected = false;
+  try {
+    static_cast<void>(deep.to_html());
+  } catch (const std::length_error&) {
+    deep_rejected = true;
+  }
+  require(deep_rejected, "tooling report rendered beyond the inspector depth bound");
+
+  dui::ToolingReport malformed;
+  malformed.timeline.events.emplace_back();
+  malformed.timeline.events.front().duration = std::chrono::nanoseconds{-1};
+  bool malformed_rejected = false;
+  try {
+    static_cast<void>(malformed.to_html());
+  } catch (const std::invalid_argument&) {
+    malformed_rejected = true;
+  }
+  require(malformed_rejected, "tooling report accepted malformed timeline data");
+
+  malformed.timeline.events.clear();
+  malformed.inspector.root.emplace();
+  malformed.inspector.root->state = static_cast<dui::InspectorElementState>(99);
+  malformed_rejected = false;
+  try {
+    static_cast<void>(malformed.to_html());
+  } catch (const std::invalid_argument&) {
+    malformed_rejected = true;
+  }
+  require(malformed_rejected, "tooling report accepted an unknown Element state");
+
+  malformed.inspector.root->state = dui::InspectorElementState::active;
+  malformed.inspector.root->render_object.emplace();
+  malformed.inspector.root->render_object->protocol = static_cast<dui::InspectorRenderProtocol>(99);
+  malformed_rejected = false;
+  try {
+    static_cast<void>(malformed.to_html());
+  } catch (const std::invalid_argument&) {
+    malformed_rejected = true;
+  }
+  require(malformed_rejected, "tooling report accepted an unknown RenderObject protocol");
+}
+
 void duplicate_keys_are_rejected() {
   dui::BuildOwner owner;
   owner.render(ItemList{{{1, "original"}}});
@@ -1486,6 +1622,7 @@ int main() {
     timeline_recorder_is_deterministic_bounded_and_failure_safe();
     timeline_recorder_streams_completed_batches();
     timeline_json_is_canonical_and_strict();
+    tooling_report_html_is_safe_and_deterministic();
     duplicate_keys_are_rejected();
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';

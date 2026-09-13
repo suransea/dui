@@ -77,6 +77,18 @@ Tooling can poll bounded completion-order batches through recorder-local weak
 cursors; overwrite and clear gaps are reported exactly without retaining the
 recorder or invoking callbacks under its lock.
 
+`ToolingReport` combines detached inspector and timeline snapshots into one
+deterministic, responsive HTML file for offline diagnosis. The report shows the
+active/dormant Element hierarchy, opted-in state and RenderObject metadata, and
+retained UI/raster events without scripts, remote assets, native handles, or
+live runtime dependencies. Dynamic strings use the canonical JSON Unicode rules
+before HTML escaping, and a restrictive Content Security Policy prevents them
+from becoming markup.
+
+```sh
+./build/debug/dui_tooling_report > build/debug/tooling-report.html
+```
+
 Implemented layout Views include `VStack`, `HStack`, `Stack`, `Padding`,
 `ColoredBox`, `Viewport`, and `SliverToBoxAdapter`; primitives include `Text`
 and `Image`. `SliverFixedExtentList` provides the first scrolling-list protocol.

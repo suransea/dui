@@ -316,6 +316,15 @@ struct TimelineSnapshot {
   friend bool operator==(const TimelineSnapshot&, const TimelineSnapshot&) = default;
 };
 
+struct ToolingReport {
+  InspectorSnapshot inspector;
+  TimelineSnapshot timeline;
+
+  [[nodiscard]] std::string to_html() const;
+
+  friend bool operator==(const ToolingReport&, const ToolingReport&) = default;
+};
+
 class TimelineCursor final {
 public:
   TimelineCursor() = default;

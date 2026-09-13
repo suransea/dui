@@ -58,6 +58,10 @@ if(DUI_BUILD_EXAMPLES)
     add_executable(dui_counter examples/counter.cpp)
     target_link_libraries(dui_counter PRIVATE dui::dui)
     dui_configure_target(dui_counter)
+
+    add_executable(dui_tooling_report examples/tooling_report.cpp)
+    target_link_libraries(dui_tooling_report PRIVATE dui::dui)
+    dui_configure_target(dui_tooling_report)
 endif()
 
 if(DUI_BUILD_TESTS)

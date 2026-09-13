@@ -322,7 +322,7 @@ Status: structured-inspector, concurrent UI/raster timeline collection,
 cross-lane flow correlation, canonical timeline serialization, and
 Chrome/Perfetto trace-export and incremental-transport slices implemented and
 verified. Opt-in inspector state-value formatting is also implemented and
-verified.
+verified. The first detached HTML tooling frontend is implemented and verified.
 
 `BuildOwner::inspect()` now captures an owned, passive Element-tree snapshot.
 Each node records stable identity/generation, depth, name/value/key, active or
@@ -338,8 +338,7 @@ malformed bytes become deterministic `U+FFFD` escapes, and capture/serialization
 enforce a 512-node depth bound while lookup remains iterative. Existing
 `dump_tree()` output remains compatible. Tests cover empty, dirty, framed,
 keyed, focused, escaped/malformed UTF-8, bounded deep, deterministic, owner-
-independent, reentrancy-rejected, and dormant Sliver snapshots. GUI tooling
-remains pending.
+independent, reentrancy-rejected, and dormant Sliver snapshots.
 
 The opt-in state-value slice adds a formatter overload to named state
 declarations while preserving default privacy. Slots cache only detached
@@ -439,6 +438,22 @@ snapshot ordering, pagination, empty polls, overwrite and clear gaps, an
 in-flight finish after clear, continued and late readers, zero limits, foreign
 and expired cursors, detached lifetime, and concurrent UI/raster polling with
 clear.
+
+The first GUI-tooling slice adds a value-only `ToolingReport` that combines
+detached inspector and timeline snapshots into a complete responsive HTML
+document. Its summary exposes pending pipeline and retained/dropped-event
+counts; the Element panel preserves active/dormant hierarchy and shows identity,
+lifecycle, safe counts, opted-in state strings, and RenderObject metadata; the
+timeline table preserves retained snapshot order and exposes all timing and
+correlation fields. Reports use inline CSS but no script, network, font, image,
+native handle, polling, or runtime callback. A restrictive Content Security
+Policy accompanies JSON-normalized and HTML-escaped user strings. Output is
+classic-locale and byte deterministic. Tests cover empty and mixed reports,
+responsive/security markup, hostile and malformed UTF-8 strings, state nulls,
+RenderObject details, both lanes, all outcomes, correlation IDs, vector order,
+locale independence, focus-node visibility, depth limits, and malformed
+inspector-enum or timeline rejection. The incremental transport remains the
+foundation for a future live frontend.
 
 ## Verification
 

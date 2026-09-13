@@ -859,6 +859,38 @@ immediate refresh after set/update, formatter replacement and revocation,
 exception-to-null isolation, detached snapshot lifetime, dormant keep-alive
 values, and unchanged state identity/rebuild behavior.
 
+The static-tooling-frontend slice adds a detached `ToolingReport` containing an
+`InspectorSnapshot` and `TimelineSnapshot`. `to_html()` produces one complete,
+deterministic, responsive HTML document that callers may write to disk and open
+in a browser. The report is a passive presentation adapter: it does not retain a
+`BuildOwner` or recorder, poll live transport, invoke formatters, mutate either
+snapshot, or change their JSON schemas. A later live frontend can consume the
+same snapshots and completion batches.
+
+The document uses no script, remote asset, font, image, or external stylesheet.
+A restrictive Content Security Policy permits only its inline style. The header
+summarizes mount/unmount and pending pipeline counts plus retained/dropped
+timeline totals. The Element panel renders the active and dormant hierarchy in
+snapshot order with stable IDs, keys, lifecycle/dirty/focus state, safe counts,
+optional RenderObject details, and opted-in state strings or unavailable values.
+The timeline panel renders retained events in snapshot order as a horizontally
+scrollable table containing lane, phase, outcome, nanosecond timing, span,
+parent, frame, flow, pass, and work identifiers. Empty tree and timeline states
+have explicit text rather than fabricated rows.
+
+All user-derived strings are first encoded with the inspector's canonical JSON
+string rules, then HTML-escaped and displayed as literals. This preserves valid
+UTF-8, visibly normalizes malformed input, represents control characters, and
+prevents markup injection without a second divergent Unicode decoder. Numeric
+fields use classic-locale base-10 output. Tree rendering enforces the same
+512-node depth bound and rejects unknown Element-state or RenderObject-protocol
+enums; timeline rendering rejects unknown enums and negative durations as the
+existing serializers do. Acceptance covers empty and mixed
+reports, active/dormant nesting, state string/null output, RenderObject metadata,
+all timeline lanes/outcomes and correlation IDs, stable snapshot order,
+responsive/security markup, hostile and malformed strings, locale independence,
+repeatable bytes, detached lifetime, and malformed/deep input rejection.
+
 ## Prototype acceptance criteria
 
 M0 is accepted when headless tests demonstrate:

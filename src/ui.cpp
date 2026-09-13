@@ -867,6 +867,34 @@ void append_json_bool(std::ostringstream& output, bool value) {
   output << (value ? "true" : "false");
 }
 
+void append_html_literal(std::ostringstream& output, std::string_view value) {
+  std::ostringstream encoded;
+  encoded.imbue(std::locale::classic());
+  append_json_string(encoded, value);
+  for (const char character : std::move(encoded).str()) {
+    switch (character) {
+    case '&':
+      output << "&amp;";
+      break;
+    case '<':
+      output << "&lt;";
+      break;
+    case '>':
+      output << "&gt;";
+      break;
+    case '"':
+      output << "&quot;";
+      break;
+    case '\'':
+      output << "&#39;";
+      break;
+    default:
+      output << character;
+      break;
+    }
+  }
+}
+
 std::string_view inspector_state_name(InspectorElementState state) {
   switch (state) {
   case InspectorElementState::active:
@@ -1060,6 +1088,93 @@ void append_json_node(std::ostringstream& output, const InspectorNode& node, std
   output << "]}";
 }
 
+void append_tooling_node(std::ostringstream& output, const InspectorNode& node, std::size_t depth) {
+  if (depth >= InspectorSnapshot::maximum_depth) {
+    throw std::length_error("Tooling report exceeds the inspector maximum depth");
+  }
+  std::string_view state_name;
+  switch (node.state) {
+  case InspectorElementState::active:
+    state_name = "active";
+    break;
+  case InspectorElementState::dormant_keep_alive:
+    state_name = "dormant";
+    break;
+  default:
+    throw std::invalid_argument("Tooling report Element has an unknown state");
+  }
+  if (node.render_object.has_value()) {
+    switch (node.render_object->protocol) {
+    case InspectorRenderProtocol::object:
+    case InspectorRenderProtocol::box:
+    case InspectorRenderProtocol::sliver:
+      break;
+    default:
+      throw std::invalid_argument("Tooling report RenderObject has an unknown protocol");
+    }
+  }
+  output << "<li><details open><summary><code>";
+  append_html_literal(output, node.name);
+  output << "</code><span class=\"identity\">#" << node.id << ':' << node.generation
+         << "</span><span class=\"badge " << state_name << "\">" << state_name << "</span>";
+  if (node.dirty) {
+    output << "<span class=\"badge dirty\">dirty</span>";
+  }
+  if (node.focused) {
+    output << "<span class=\"badge focus\">focused</span>";
+  } else if (node.has_focus_node) {
+    output << "<span class=\"badge focusable\">focusable</span>";
+  }
+  output << "</summary><dl class=\"facts\"><dt>Depth</dt><dd>" << node.depth
+         << "</dd><dt>Updates</dt><dd>" << node.update_count << "</dd><dt>State slots</dt><dd>"
+         << node.state_slot_count << "</dd><dt>Dependencies</dt><dd>" << node.dependency_count
+         << "</dd><dt>Environment</dt><dd>" << node.environment_count
+         << "</dd><dt>Resources</dt><dd>" << node.resource_count << "</dd></dl>";
+  if (!node.key.empty()) {
+    output << "<p><strong>Key</strong> <code>";
+    append_html_literal(output, node.key);
+    output << "</code></p>";
+  }
+  if (!node.value.empty()) {
+    output << "<p><strong>Debug value</strong> <code>";
+    append_html_literal(output, node.value);
+    output << "</code></p>";
+  }
+  if (!node.state_values.empty()) {
+    output << "<table class=\"states\"><thead><tr><th>State</th><th>Value</th></tr></thead><tbody>";
+    for (const InspectorStateSnapshot& state : node.state_values) {
+      output << "<tr><td><code>";
+      append_html_literal(output, state.name);
+      output << "</code></td><td>";
+      if (state.value.has_value()) {
+        output << "<code>";
+        append_html_literal(output, *state.value);
+        output << "</code>";
+      } else {
+        output << "<em>unavailable</em>";
+      }
+      output << "</td></tr>";
+    }
+    output << "</tbody></table>";
+  }
+  if (node.render_object.has_value()) {
+    const InspectorRenderSnapshot& render = *node.render_object;
+    output << "<p class=\"render\"><strong>Render #" << render.id << "</strong> "
+           << inspector_protocol_name(render.protocol) << " | layout " << render.layout_count
+           << " | paint " << render.paint_count << " | flags " << (render.needs_layout ? "L" : "-")
+           << (render.needs_paint ? "P" : "-") << (render.needs_compositing ? "C" : "-")
+           << (render.repaint_boundary ? " | boundary" : "") << "</p>";
+  }
+  if (!node.children.empty()) {
+    output << "<ol>";
+    for (const InspectorNode& child : node.children) {
+      append_tooling_node(output, child, depth + 1);
+    }
+    output << "</ol>";
+  }
+  output << "</details></li>";
+}
+
 void append_tree(const Element& element, std::ostringstream& output, std::size_t indent) {
   output << std::string(indent, ' ') << element.debug_name() << '#' << element.id();
   if (!element.key().empty()) {
@@ -1208,6 +1323,96 @@ std::string TimelineSnapshot::to_chrome_trace_json() const {
   }
   output << "],\"displayTimeUnit\":\"ns\",\"duiDroppedEventCount\":" << dropped_event_count
          << ",\"duiTimeOriginNs\":\"" << origin.count() << "\"}";
+  return std::move(output).str();
+}
+
+std::string ToolingReport::to_html() const {
+  for (const TimelineEvent& event : timeline.events) {
+    validate_timeline_event(event);
+  }
+
+  std::ostringstream output;
+  output.imbue(std::locale::classic());
+  output
+    << "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+       "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+       "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src "
+       "'unsafe-inline'\"><title>DUI tooling report</title><style>"
+       ":root{color-scheme:dark;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;"
+       "background:#0a1017;color:#d9e2ec}*{box-sizing:border-box}body{margin:0;background:"
+       "radial-gradient(circle at 15% 0,#183246 0,#0a1017 38rem);line-height:1.45}header,main,"
+       "footer{width:min(1180px,calc(100% - 2rem));margin:auto}header{padding:3rem 0 1.5rem}"
+       ".kicker{margin:0;color:#ffbd66;text-transform:uppercase;letter-spacing:.18em;font-size:"
+       ".75rem}h1{font-family:Georgia,serif;font-size:clamp(2rem,6vw,4.6rem);font-weight:400;"
+       "line-height:.95;margin:.5rem 0 2rem;color:#f4f7fa}.summary{display:grid;grid-template-"
+       "columns:repeat(auto-fit,minmax(9rem,1fr));gap:.75rem}.metric,section{background:#101b25;"
+       "border:1px solid #294052;border-radius:.35rem;box-shadow:0 1rem 3rem #0005}.metric{padding:"
+       "1rem}.metric b{display:block;color:#7dd3c7;font-size:1.5rem}.metric span{color:#91a4b5;"
+       "font-size:.72rem;text-transform:uppercase;letter-spacing:.08em}main{display:grid;gap:1rem;"
+       "padding:1rem 0 3rem}section{padding:clamp(1rem,3vw,2rem);overflow:hidden}h2{font-family:"
+       "Georgia,serif;font-weight:400;color:#ffbd66;margin:0 0 "
+       "1rem}ol{list-style:none;padding-left:"
+       "1.1rem;margin:.4rem 0;border-left:1px solid #294052}li{margin:.45rem "
+       "0}summary{cursor:pointer;"
+       "display:flex;gap:.55rem;align-items:center;flex-wrap:wrap}code{color:#d9e2ec;background:"
+       "#071018;padding:.08rem .28rem;border-radius:.2rem}.identity{color:#7890a3}.badge{font-size:"
+       ".68rem;text-transform:uppercase;padding:.1rem .35rem;border:1px solid;border-radius:9rem}"
+       ".active{color:#7dd3c7}.dormant{color:#91a4b5}.dirty{color:#ff817a}.focus{color:#ffbd66}"
+       ".focusable{color:#b6a5ff}"
+       ".facts{display:flex;gap:.45rem 1rem;flex-wrap:wrap;margin:.65rem 0;color:#91a4b5;font-size:"
+       ".78rem}.facts dt{font-weight:bold}.facts dd{margin:0;color:#d9e2ec}.render{color:#91a4b5}"
+       ".table-wrap{overflow:auto;border:1px solid #294052}table{border-collapse:collapse;width:"
+       "100%;font-size:.78rem}th,td{text-align:left;padding:.55rem .7rem;border-bottom:1px solid "
+       "#223543;white-space:nowrap}th{position:sticky;top:0;background:#172632;color:#ffbd66}"
+       "tbody tr:nth-child(even){background:#0c161f}.outcome-failed,.outcome-lost{color:#ff817a}"
+       ".outcome-completed{color:#7dd3c7}.empty{color:#91a4b5;font-style:italic}footer{color:"
+       "#7890a3;padding:0 0 2rem;font-size:.75rem}@media(max-width:620px){header{padding-top:2rem}"
+       "header,main,footer{width:min(100% - "
+       "1rem,1180px)}section{padding:.8rem}ol{padding-left:.5rem}"
+       ".facts{display:grid;grid-template-columns:auto 1fr}}"
+       "</style></head><body><header><p class=\"kicker\">Detached diagnostics</p>"
+       "<h1>DUI tooling report</h1><div class=\"summary\">";
+  const auto metric = [&](std::string_view label, auto value) {
+    output << "<div class=\"metric\"><b>" << value << "</b><span>" << label << "</span></div>";
+  };
+  metric("mounts", inspector.mount_count);
+  metric("unmounts", inspector.unmount_count);
+  metric("pending builds", inspector.pending_build_count);
+  metric("pending layout", inspector.pending_layout_count);
+  metric("pending paint", inspector.pending_paint_count);
+  metric("pending composite", inspector.pending_compositing_count);
+  metric("timeline events", timeline.events.size());
+  metric("dropped events", timeline.dropped_event_count);
+  output << "</div></header><main><section><h2>Element tree</h2>";
+  if (inspector.root.has_value()) {
+    output << "<ol class=\"tree\">";
+    append_tooling_node(output, *inspector.root, 0);
+    output << "</ol>";
+  } else {
+    output << "<p class=\"empty\">No mounted Element tree.</p>";
+  }
+  output << "</section><section><h2>Timeline</h2>";
+  if (timeline.events.empty()) {
+    output << "<p class=\"empty\">No retained timeline events.</p>";
+  } else {
+    output << "<div class=\"table-wrap\"><table><thead><tr><th>Sequence</th><th>Lane</th>"
+              "<th>Phase</th><th>Outcome</th><th>Start ns</th><th>Duration ns</th><th>Span</th>"
+              "<th>Parent</th><th>Frame</th><th>Flow</th><th>Pass</th><th>Work</th></tr></thead>"
+              "<tbody>";
+    for (const TimelineEvent& event : timeline.events) {
+      const std::string_view outcome = timeline_outcome_name(event.outcome);
+      output << "<tr><td>" << event.sequence << "</td><td>" << timeline_lane_name(event.lane)
+             << "</td><td>" << timeline_phase_name(event.phase) << "</td><td class=\"outcome-"
+             << outcome << "\">" << outcome << "</td><td>" << event.start.count() << "</td><td>"
+             << event.duration.count() << "</td><td>" << event.span_id << "</td><td>"
+             << event.parent_span_id << "</td><td>" << event.frame_id << "</td><td>"
+             << event.flow_id << "</td><td>" << event.pass << "</td><td>" << event.work_count
+             << "</td></tr>";
+    }
+    output << "</tbody></table></div>";
+  }
+  output << "</section></main><footer>Generated from detached DUI snapshots. No scripts or "
+            "remote assets.</footer></body></html>";
   return std::move(output).str();
 }
 
