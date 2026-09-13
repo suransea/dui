@@ -280,6 +280,32 @@ failed-delivery retry with identical changes, failed and successful clear,
 reentrant publish/clear rejection, callback-driven bridge destruction, malformed
 tree rejection before adapter invocation, and BuildOwner snapshot delivery.
 
+The first native accessibility consumer is a conditional Win32 UI Automation
+adapter bound to one `HWND`. Because a semantics snapshot may contain multiple
+roots, it presents one synthetic fragment root without consuming a semantic ID
+and attaches every semantic root beneath it. Stable 64-bit semantic IDs form
+stable UIA runtime and automation IDs. Providers resolve entries from the live
+adapter model on every call, so retained COM providers report element-not-
+available after removal rather than exposing stale properties. Roles map to UIA
+group, text, image, and button control types; labels, read-only values, enabled
+state, logical client bounds, parent/sibling/child navigation, deterministic
+reverse-order point lookup, and the Invoke pattern are exposed. Invoke posts a
+private window message and returns immediately; the host callback then normally
+calls `BuildOwner::perform_semantics_action` on the window thread. Semantic focus
+is not fabricated before the platform-neutral tree exposes focus state. Delivered
+batches validate and replace the native model transactionally, then invalidate
+the root's child structure.
+The host forwards `WM_GETOBJECT` to the adapter before `DefWindowProcW`; all COM
+and window-procedure entry points translate C++ exceptions. Provider access,
+adapter updates, and actions are confined to the window-owning thread. Bounds
+are supplied in logical client coordinates and converted to physical screen
+coordinates with a device-pixel ratio that the host updates after DPI changes.
+Provider state is synchronized for UIA calls, and teardown disconnects the root
+provider and drops pending actions and host callback captures. Acceptance
+requires warning-free Win32 compilation, transactional malformed-update tests,
+message filtering tests, and target-OS verification of provider navigation,
+properties, Invoke routing, bounds, and UIA event observation.
+
 A platform text-input adapter connects a real host window to an operating
 system text service; a synthetic or terminal-only backend does not satisfy this
 requirement. One conditionally built desktop implementation is sufficient for

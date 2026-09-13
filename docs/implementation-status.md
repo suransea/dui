@@ -78,15 +78,20 @@ Implemented foundation:
 - strict UTF-8 scalar validation for editing state and ranges;
 - a conditional Win32 IMM32 text-input adapter supporting Unicode character
   editing, composition state/commit/cancel, actions, session replacement, weak
-  clients, and DPR-scaled candidate/composition positioning.
+  clients, and DPR-scaled candidate/composition positioning;
+- a conditional Win32 UI Automation adapter with a synthetic fragment root,
+  live stable-ID providers, transactional incremental updates, role/property and
+  tree navigation exposure, DPR-scaled screen bounds, point lookup,
+  `WM_GETOBJECT` integration, and asynchronous Invoke action routing.
 
 The input and lifecycle test executables cover the M2 foundation acceptance
 criteria in RFC 0001. Rendering tests additionally cover declarative gesture
 and focus integration, tree replacement during callbacks, pointer reentrancy,
 focus identity across reconciliation, cancellation, and movement between child
-hit regions of one detector. The Win32 adapter and its native test executable
-cross-compile and link warning-free with Zig's `x86_64-windows-gnu` target, but
-have not yet been executed against a real Windows HWND/IME in this environment.
+hit regions of one detector. The Win32 adapters and their native test
+executables cross-compile and link warning-free with Zig's
+`x86_64-windows-gnu` target, but have not yet been executed against a real
+Windows HWND, IME, UIA client, or screen reader in this environment.
 
 ## M3: Production Rendering
 
@@ -278,8 +283,21 @@ must not be retained, and reentrant publish or clear on the delivering bridge is
 rejected before diffing. Tests cover successful acknowledgment, identical retry
 records after failed publish/clear, no-op suppression, reentrancy, malformed
 trees, callback-driven bridge destruction on success and failure, and BuildOwner
-snapshots. Bridges are noncopyable, nonmovable, and UI-thread confined. Native
-UIA, AppKit, AT-SPI, and mobile implementations remain pending.
+snapshots. Bridges are noncopyable, nonmovable, and UI-thread confined.
+
+The Win32 accessibility slice implements the first native consumer. It exposes
+one synthetic UIA fragment root for all semantic roots and resolves retained COM
+providers against the current stable-ID model. UIA properties cover role, name,
+value, automation ID, enabled/content/control state, and DPR-scaled screen
+bounds; fragment navigation, reverse-order point lookup, and button Invoke route
+back through a private window message to the host's semantic-action callback.
+The adapter does not fabricate semantic focus before the neutral tree represents
+it. Updates reject malformed IDs, parents, cycles, sibling indexes, geometry,
+and change sequences before swapping the native model. `WM_GETOBJECT` and COM
+entry points contain exceptions. The conditional test covers transactional
+malformed delivery and message filtering; the executable cross-compiles and
+links warning-free, while real UIA client and screen-reader verification remains
+pending.
 
 ## Verification
 
@@ -319,12 +337,12 @@ The prototype has been built and tested with:
   component or callback.
 - The only native text-input adapter is currently Win32 IMM32. Other platforms
   still require adapters.
-- Semantics snapshots and actions are platform neutral; macOS Accessibility,
-  Windows UI Automation, Linux AT-SPI, and mobile accessibility adapters are not
-  implemented.
+- Windows UI Automation is the only native accessibility adapter. macOS
+  Accessibility, Linux AT-SPI, and mobile adapters are not implemented, and the
+  Win32 provider still requires target-OS interoperability verification.
 
 ## Next Milestone
 
-Run the Win32 text-input suite against a real message-pumped HWND and native
-IMEs to finish M2 verification. M3 continues with a production GPU layer
-consumer and native accessibility adapters.
+Run the Win32 text-input and accessibility suites against a real message-pumped
+HWND, native IMEs, UIA clients, and a screen reader. M3 continues with a
+production GPU layer consumer and accessibility adapters for other platforms.

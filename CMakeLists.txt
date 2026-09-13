@@ -30,9 +30,9 @@ target_link_libraries(dui PUBLIC Threads::Threads)
 dui_configure_target(dui)
 
 if(WIN32)
-    add_library(dui_win32 STATIC src/platform/win32_text_input.cpp)
+    add_library(dui_win32 STATIC src/platform/win32_accessibility.cpp src/platform/win32_text_input.cpp)
     add_library(dui::win32 ALIAS dui_win32)
-    target_link_libraries(dui_win32 PUBLIC dui::dui PRIVATE imm32 user32)
+    target_link_libraries(dui_win32 PUBLIC dui::dui PRIVATE imm32 oleaut32 uiautomationcore user32)
     target_include_directories(dui_win32 PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
@@ -85,6 +85,11 @@ if(DUI_BUILD_TESTS)
     add_test(NAME dui_backend_tests COMMAND dui_backend_tests)
 
     if(WIN32)
+        add_executable(dui_win32_accessibility_tests tests/win32_accessibility_tests.cpp)
+        target_link_libraries(dui_win32_accessibility_tests PRIVATE dui::win32)
+        dui_configure_target(dui_win32_accessibility_tests)
+        add_test(NAME dui_win32_accessibility_tests COMMAND dui_win32_accessibility_tests)
+
         add_executable(dui_win32_text_input_tests tests/win32_text_input_tests.cpp)
         target_link_libraries(dui_win32_text_input_tests PRIVATE dui::win32)
         dui_configure_target(dui_win32_text_input_tests)
