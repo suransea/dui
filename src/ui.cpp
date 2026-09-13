@@ -371,6 +371,48 @@ void BuildOwner::set_timeline_recorder(std::shared_ptr<TimelineRecorder> recorde
   timeline_recorder_ = std::move(recorder);
 }
 
+void BuildOwner::restore_state(RestorationSnapshot snapshot) {
+  if (reconciling_ || framing_ || formatting_state_) {
+    throw std::logic_error("BuildOwner cannot restore state during an active owner operation");
+  }
+  if (root_ != nullptr || !registry_.empty() || mount_count_ != 0) {
+    throw std::logic_error("BuildOwner can restore state only before its first mount");
+  }
+
+  std::unordered_map<std::string, RestorationValue> staged;
+  staged.reserve(snapshot.records.size());
+  for (RestorationRecord& record : snapshot.records) {
+    if (record.id.empty()) {
+      throw std::invalid_argument("Restoration snapshot contains an empty ID");
+    }
+    if (!staged.emplace(std::move(record.id), std::move(record.value)).second) {
+      throw std::invalid_argument("Restoration snapshot contains duplicate IDs");
+    }
+  }
+  pending_restoration_.swap(staged);
+}
+
+void BuildOwner::discard_pending_restoration() {
+  if (reconciling_ || framing_ || formatting_state_) {
+    throw std::logic_error(
+      "BuildOwner cannot discard restoration state during an active owner operation");
+  }
+  pending_restoration_.clear();
+}
+
+bool BuildOwner::restoration_id_in_use(std::string_view id, Element::Id element,
+                                       std::uint64_t slot) const {
+  for (const auto& [candidate_id, candidate] : registry_) {
+    for (const auto& [candidate_slot, state] : candidate->state_) {
+      if ((candidate_id != element || candidate_slot != slot) && state.restoration_id.has_value() &&
+          *state.restoration_id == id) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 std::unique_ptr<Element> BuildOwner::make_element(TypeToken type, Key key, std::string debug_name,
                                                   Element* parent) {
   const auto id = next_id_++;
@@ -1414,6 +1456,39 @@ std::string ToolingReport::to_html() const {
   output << "</section></main><footer>Generated from detached DUI snapshots. No scripts or "
             "remote assets.</footer></body></html>";
   return std::move(output).str();
+}
+
+RestorationSnapshot BuildOwner::save_restoration_state() const {
+  if (reconciling_ || framing_ || formatting_state_) {
+    throw std::logic_error(
+      "BuildOwner cannot save restoration state during an active owner operation");
+  }
+
+  RestorationSnapshot snapshot;
+  snapshot.records.reserve(pending_restoration_.size() + registry_.size());
+  for (const auto& [id, value] : pending_restoration_) {
+    snapshot.records.push_back({id, value});
+  }
+  for (const auto& [element_id, element] : registry_) {
+    static_cast<void>(element_id);
+    for (const auto& [slot_id, state] : element->state_) {
+      static_cast<void>(slot_id);
+      if (!state.restoration_id.has_value()) {
+        continue;
+      }
+      if (!state.restoration_value.has_value()) {
+        throw std::logic_error("Restorable state has no cached value");
+      }
+      snapshot.records.push_back({*state.restoration_id, *state.restoration_value});
+    }
+  }
+  std::ranges::sort(snapshot.records, {}, &RestorationRecord::id);
+  for (std::size_t index = 1; index < snapshot.records.size(); ++index) {
+    if (snapshot.records[index - 1].id == snapshot.records[index].id) {
+      throw std::logic_error("BuildOwner contains duplicate restoration IDs");
+    }
+  }
+  return snapshot;
 }
 
 InspectorSnapshot BuildOwner::inspect() const {

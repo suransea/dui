@@ -322,7 +322,8 @@ Status: structured-inspector, concurrent UI/raster timeline collection,
 cross-lane flow correlation, canonical timeline serialization, and
 Chrome/Perfetto trace-export and incremental-transport slices implemented and
 verified. Opt-in inspector state-value formatting is also implemented and
-verified. The first detached HTML tooling frontend is implemented and verified.
+verified. The first detached HTML tooling frontend and same-process state-
+restoration slice are implemented and verified.
 
 `BuildOwner::inspect()` now captures an owned, passive Element-tree snapshot.
 Each node records stable identity/generation, depth, name/value/key, active or
@@ -369,7 +370,7 @@ an exact drop count, and snapshots remain valid after recorder and owner
 destruction. Tests use fake clocks to cover exact timing and nesting, disabled
 clock reads, dirty and clean work counts, failure recovery, bounded overflow,
 clear without ID reuse, and all successful sixteen-pass and rejected
-seventeen-pass lazy stabilization phases. Timeline GUI tooling remains pending.
+seventeen-pass lazy stabilization phases. A live timeline GUI remains pending.
 
 `TimelineSnapshot::to_json()` now emits versioned canonical DUI JSON with fixed
 root and event field order, classic-locale base-10 integers, nanosecond timing,
@@ -455,6 +456,24 @@ locale independence, focus-node visibility, depth limits, and malformed
 inspector-enum or timeline rejection. The incremental transport remains the
 foundation for a future live frontend.
 
+The initial restoration slice adds explicit
+`BuildContext::restorable_state<Name>(initial, restorationId)` declarations for
+booleans, integrals representable by `int64` or `uint64`, and strings. An overload
+composes restoration with inspector formatting. `save_restoration_state()`
+captures cached tagged values from active and dormant Elements plus unclaimed
+records in deterministic ID order without invoking user code. A pristine
+replacement owner stages a validated snapshot and consumes matching values
+before each state slot's first build read. Caller-owned IDs are nonempty and
+globally unique among live slots; ordinary state declaration revokes a slot's
+restoration metadata, while a live slot newly adopting an ID supersedes pending
+data. Unknown records remain available for unrealized lazy items and repeated
+replacement, or can be explicitly discarded. Tests cover all value categories
+and integer edges, embedded string nulls, first-build visibility, owner/handle
+independence, inspector composition, revocation, duplicate and empty IDs,
+transactional snapshot replacement, category/range rejection without
+consumption, pristine-owner enforcement, dormant capture, delayed lazy
+realization, repeated replacement, and formatter reentrancy rejection.
+
 ## Verification
 
 The prototype has been built and tested with:
@@ -490,6 +509,9 @@ The prototype has been built and tested with:
   leaf-to-root activation. Drag recognizers, touch slop, capture, and hover
   policies remain future interaction work.
 - UI-thread confinement is contractual rather than executor-enforced.
+- Restoration currently uses detached in-process values with caller-global IDs;
+  persistent wire encoding, migrations, custom codecs, hierarchical scopes, and
+  dynamic-module unload coordination remain future work.
 - Environment references are build-scoped and must not be retained by a
   component or callback.
 - The only native text-input adapter is currently Win32 IMM32. Other platforms

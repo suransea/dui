@@ -6,8 +6,8 @@
 
 struct ReportCounter {
   auto build(dui::BuildContext& context) const {
-    const auto count =
-      context.state<"count">(3, [](const int& value) { return std::to_string(value); });
+    const auto count = context.restorable_state<"count">(
+      3, "example.counter", [](const int& value) { return std::to_string(value); });
     return dui::VStack{dui::Text{"Counter <preview>"},
                        dui::Text{"Count: " + std::to_string(count.get())}};
   }

@@ -891,6 +891,52 @@ all timeline lanes/outcomes and correlation IDs, stable snapshot order,
 responsive/security markup, hostile and malformed strings, locale independence,
 repeatable bytes, detached lifetime, and malformed/deep input rejection.
 
+The initial state-restoration slice supports same-process replacement-owner hot
+restart without transplanting a live tree.
+`BuildContext::restorable_state<Name>(initial, restorationId)` opts a named slot
+into restoration with a caller-owned,
+nonempty, globally unique byte-string ID. A formatter overload composes the same
+slot with inspector exposure. Supported values are `bool`, signed or unsigned
+integrals losslessly representable by `int64` or `uint64`, and `std::string`.
+Detached records use a tagged `bool`, `int64`, `uint64`, or string value rather
+than object representations, RTTI names, `std::any`, callbacks, pointers, or
+native handles.
+Custom codecs, migrations, persistent wire serialization, hierarchical ID
+scopes, and module loading/unloading are later slices.
+
+`BuildOwner::save_restoration_state()` passively copies cached restoration
+values from active and dormant Elements, merges records not yet claimed from an
+installed snapshot, and sorts by bytewise ID. It invokes no user code and
+rejects capture during reconciliation, framing, or inspector formatting.
+Duplicate live IDs are rejected when declared. Calling ordinary `state<Name>`
+revokes restoration for that slot; changing a slot's restoration ID is allowed
+only when the replacement ID is otherwise unused. State mutation stages the
+tagged value before assigning the live value, then refreshes inspection and
+schedules the existing coalesced rebuild.
+
+`BuildOwner::restore_state(snapshot)` validates nonempty unique IDs into staged
+storage and atomically replaces pending records. It is allowed only before that
+owner has ever mounted an Element and invokes no user code. On the first
+matching restorable declaration, an exactly matching value category is range-
+checked, installed before the build reads its handle, and consumed only after
+slot installation succeeds. A type/category/range mismatch throws and leaves
+the pending record available. A live slot that newly adopts an ID supersedes
+and consumes any pending record rather than overwriting established state.
+Unknown records remain pending for future lazy mounts, survive another snapshot,
+and can be removed explicitly with `discard_pending_restoration()`.
+
+The old owner remains independent and usable while a replacement owner is
+constructed; its Elements, state handles, resources, focus, gestures, tasks,
+RenderObjects, and callbacks never cross the boundary. Whole-tree atomicity is
+provided by swapping to the replacement owner only after its initialization
+succeeds, because failed user builds are not yet transactional. Acceptance
+covers first-build restoration, owner and handle independence, private and
+revoked state, inspector composition, all supported value categories and range
+edges, deterministic order, duplicate/empty IDs, pristine-owner enforcement,
+pending lazy-style records and discard, dormant capture, category/range failure
+without consumption, repeated replacement, mutation refresh, and formatter
+reentrancy rejection during restoration capture.
+
 ## Prototype acceptance criteria
 
 M0 is accepted when headless tests demonstrate:

@@ -89,6 +89,21 @@ from becoming markup.
 ./build/debug/dui_tooling_report > build/debug/tooling-report.html
 ```
 
+Opt-in restoration supports replacement-owner hot restart for booleans,
+integers, and strings. Restoration IDs are caller-owned and globally unique;
+restored values are available during the replacement tree's first build. The
+snapshot contains detached tagged values, not Elements, callbacks, `std::any`,
+RTTI, resources, or native handles.
+
+```cpp
+auto count = context.restorable_state<"count">(0, "app.counter");
+
+auto saved = owner.save_restoration_state();
+dui::BuildOwner replacement;
+replacement.restore_state(std::move(saved));
+replacement.render(App{});
+```
+
 Implemented layout Views include `VStack`, `HStack`, `Stack`, `Padding`,
 `ColoredBox`, `Viewport`, and `SliverToBoxAdapter`; primitives include `Text`
 and `Image`. `SliverFixedExtentList` provides the first scrolling-list protocol.

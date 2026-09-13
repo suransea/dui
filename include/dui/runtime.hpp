@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -20,6 +21,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace dui {
@@ -65,6 +67,70 @@ namespace detail {
 struct ElementAccess;
 }
 
+using RestorationValue = std::variant<bool, std::int64_t, std::uint64_t, std::string>;
+
+struct RestorationRecord {
+  std::string id;
+  RestorationValue value;
+
+  friend bool operator==(const RestorationRecord&, const RestorationRecord&) = default;
+};
+
+struct RestorationSnapshot {
+  std::vector<RestorationRecord> records;
+
+  friend bool operator==(const RestorationSnapshot&, const RestorationSnapshot&) = default;
+};
+
+template <class T>
+concept RestorableStateValue = (std::same_as<std::remove_cvref_t<T>, std::string>) ||
+                               (std::same_as<std::remove_cvref_t<T>, bool>) ||
+                               (std::signed_integral<std::remove_cvref_t<T>> &&
+                                std::numeric_limits<std::remove_cvref_t<T>>::digits <=
+                                  std::numeric_limits<std::int64_t>::digits) ||
+                               (std::unsigned_integral<std::remove_cvref_t<T>> &&
+                                std::numeric_limits<std::remove_cvref_t<T>>::digits <=
+                                  std::numeric_limits<std::uint64_t>::digits);
+
+namespace detail {
+
+template <RestorableStateValue T> RestorationValue encode_restoration_value(const T& value) {
+  using Value = std::remove_cvref_t<T>;
+  if constexpr (std::same_as<Value, std::string> || std::same_as<Value, bool>) {
+    return value;
+  } else if constexpr (std::signed_integral<Value>) {
+    return static_cast<std::int64_t>(value);
+  } else {
+    return static_cast<std::uint64_t>(value);
+  }
+}
+
+template <RestorableStateValue T>
+std::remove_cvref_t<T> decode_restoration_value(const RestorationValue& value) {
+  using Value = std::remove_cvref_t<T>;
+  if constexpr (std::same_as<Value, std::string> || std::same_as<Value, bool>) {
+    const Value* restored = std::get_if<Value>(&value);
+    if (restored == nullptr) {
+      throw std::invalid_argument("Restoration value category does not match state");
+    }
+    return *restored;
+  } else if constexpr (std::signed_integral<Value>) {
+    const auto* restored = std::get_if<std::int64_t>(&value);
+    if (restored == nullptr || !std::in_range<Value>(*restored)) {
+      throw std::invalid_argument("Restoration value does not fit signed state");
+    }
+    return static_cast<Value>(*restored);
+  } else {
+    const auto* restored = std::get_if<std::uint64_t>(&value);
+    if (restored == nullptr || !std::in_range<Value>(*restored)) {
+      throw std::invalid_argument("Restoration value does not fit unsigned state");
+    }
+    return static_cast<Value>(*restored);
+  }
+}
+
+} // namespace detail
+
 template <class T> class Signal;
 
 template <class T> class StateHandle;
@@ -109,6 +175,8 @@ private:
     std::any value;
     std::function<std::string(const std::any&)> inspector;
     std::optional<std::string> inspected_value;
+    std::optional<std::string> restoration_id;
+    std::optional<RestorationValue> restoration_value;
 
     void refresh_inspected_value() noexcept {
       if (!inspector) {
@@ -417,6 +485,12 @@ public:
   [[nodiscard]] const Element* root() const { return root_.get(); }
   [[nodiscard]] Element* root() { return root_.get(); }
   [[nodiscard]] InspectorSnapshot inspect() const;
+  [[nodiscard]] RestorationSnapshot save_restoration_state() const;
+  void restore_state(RestorationSnapshot snapshot);
+  [[nodiscard]] std::size_t pending_restoration_count() const {
+    return pending_restoration_.size();
+  }
+  void discard_pending_restoration();
   [[nodiscard]] std::string dump_tree() const;
   [[nodiscard]] std::size_t mount_count() const { return mount_count_; }
   [[nodiscard]] std::size_t unmount_count() const { return unmount_count_; }
@@ -500,6 +574,8 @@ private:
                        TimelineOutcome outcome) noexcept;
   [[nodiscard]] std::uint64_t next_timeline_frame_id() noexcept;
   [[nodiscard]] std::uint64_t next_timeline_flow_id() noexcept;
+  [[nodiscard]] bool restoration_id_in_use(std::string_view id, Element::Id element,
+                                           std::uint64_t slot) const;
 
   template <class T>
   [[nodiscard]] T& state(Element::Id id, std::uint64_t generation, std::uint64_t slot);
@@ -519,6 +595,7 @@ private:
   std::unordered_map<PointerId, std::shared_ptr<PointerTapRoute>> pointer_tap_routes_;
   FocusManager focus_manager_;
   std::shared_ptr<TimelineRecorder> timeline_recorder_;
+  std::unordered_map<std::string, RestorationValue> pending_restoration_;
   bool reconciling_{};
   bool framing_{};
   bool formatting_state_{};
@@ -653,6 +730,14 @@ public:
   template <fixed_string Name, class T, class Formatter>
   [[nodiscard]] StateHandle<std::decay_t<T>> state(T&& initial, Formatter&& formatter);
 
+  template <fixed_string Name, RestorableStateValue T>
+  [[nodiscard]] StateHandle<std::decay_t<T>> restorable_state(T&& initial,
+                                                              std::string restoration_id);
+
+  template <fixed_string Name, RestorableStateValue T, class Formatter>
+  [[nodiscard]] StateHandle<std::decay_t<T>>
+  restorable_state(T&& initial, std::string restoration_id, Formatter&& formatter);
+
   template <class T> [[nodiscard]] const T& watch(Signal<T>& signal);
 
   template <class T> [[nodiscard]] const T& environment();
@@ -736,13 +821,32 @@ public:
     if (build_owner.formatting_state_) {
       throw std::logic_error("StateHandle cannot mutate state from an inspector formatter");
     }
-    T& current = build_owner.template state<T>(element_, generation_, slot_);
+    Element* element = build_owner.resolve(element_, generation_);
+    if (element == nullptr) {
+      throw std::logic_error("StateHandle refers to an unmounted Element");
+    }
+    auto found = element->state_.find(slot_);
+    if (found == element->state_.end() || found->second.type != type_token<T>()) {
+      throw std::logic_error("StateHandle has an invalid state slot or type");
+    }
+    T& current = std::any_cast<T&>(found->second.value);
     if constexpr (std::equality_comparable<T>) {
       if (current == value) {
         return;
       }
     }
+    std::optional<RestorationValue> restored;
+    if (found->second.restoration_id.has_value()) {
+      if constexpr (RestorableStateValue<T>) {
+        restored = detail::encode_restoration_value(value);
+      } else {
+        throw std::logic_error("State slot has unsupported restoration metadata");
+      }
+    }
     current = std::move(value);
+    if (restored.has_value()) {
+      found->second.restoration_value = std::move(restored);
+    }
     build_owner.refresh_state_inspection(element_, generation_, slot_);
     build_owner.mark_dirty(element_, generation_);
   }
@@ -808,7 +912,7 @@ StateHandle<std::decay_t<T>> BuildContext::state(T&& initial) {
       element_->state_
         .emplace(slot,
                  Element::StateSlot{
-                   std::string(Name.view()), type_token<Value>(), std::move(value), {}, {}})
+                   std::string(Name.view()), type_token<Value>(), std::move(value), {}, {}, {}, {}})
         .first;
   }
 
@@ -816,6 +920,8 @@ StateHandle<std::decay_t<T>> BuildContext::state(T&& initial) {
     BuildOwner::StateFormattingScope formatting{*owner_};
     iterator->second.inspector = {};
     iterator->second.inspected_value.reset();
+    iterator->second.restoration_id.reset();
+    iterator->second.restoration_value.reset();
   }
 
   return StateHandle<Value>{owner_->lifetime_, element_->id_, element_->generation_, slot};
@@ -834,6 +940,85 @@ StateHandle<std::decay_t<T>> BuildContext::state(T&& initial, Formatter&& format
                 "DUI state inspector formatters must return string-constructible values");
 
   auto handle = state<Name>(std::forward<T>(initial));
+  BuildOwner::StateFormattingScope formatting{*owner_};
+  constexpr auto slot = hash_name(Name.view());
+  auto& state_slot = element_->state_.at(slot);
+  state_slot.inspector =
+    [formatter = StateFormatter(std::forward<Formatter>(formatter))](const std::any& value) {
+      return std::string(std::invoke(formatter, std::any_cast<const Value&>(value)));
+    };
+  owner_->refresh_state_inspection(element_->id_, element_->generation_, slot);
+  return handle;
+}
+
+template <fixed_string Name, RestorableStateValue T>
+StateHandle<std::decay_t<T>> BuildContext::restorable_state(T&& initial,
+                                                            std::string restoration_id) {
+  using Value = std::decay_t<T>;
+  if (owner_->formatting_state_) {
+    throw std::logic_error("BuildContext cannot declare state from an inspector formatter");
+  }
+  static_assert(std::copy_constructible<Value>,
+                "DUI restorable state values must be copy constructible");
+  if (restoration_id.empty()) {
+    throw std::invalid_argument("Restoration ID must not be empty");
+  }
+  constexpr auto slot = hash_name(Name.view());
+  auto iterator = element_->state_.find(slot);
+  if (iterator != element_->state_.end() && iterator->second.name != Name.view()) {
+    throw std::logic_error("Named state hash collision");
+  }
+  if (iterator != element_->state_.end() && iterator->second.type != type_token<Value>()) {
+    throw std::logic_error("Named state changed type");
+  }
+  if (owner_->restoration_id_in_use(restoration_id, element_->id_, slot)) {
+    throw std::logic_error("Restoration ID is already in use");
+  }
+
+  const auto pending = owner_->pending_restoration_.find(restoration_id);
+  if (iterator == element_->state_.end()) {
+    Value value = pending != owner_->pending_restoration_.end()
+                    ? detail::decode_restoration_value<Value>(pending->second)
+                    : Value(std::forward<T>(initial));
+    auto stored = std::make_any<Value>(std::move(value));
+    iterator =
+      element_->state_
+        .emplace(
+          slot,
+          Element::StateSlot{
+            std::string(Name.view()), type_token<Value>(), std::move(stored), {}, {}, {}, {}})
+        .first;
+  }
+
+  auto cached =
+    detail::encode_restoration_value(std::any_cast<const Value&>(iterator->second.value));
+  {
+    BuildOwner::StateFormattingScope formatting{*owner_};
+    iterator->second.inspector = {};
+    iterator->second.inspected_value.reset();
+    iterator->second.restoration_id = std::move(restoration_id);
+    iterator->second.restoration_value = std::move(cached);
+  }
+  if (pending != owner_->pending_restoration_.end()) {
+    owner_->pending_restoration_.erase(pending);
+  }
+  return StateHandle<Value>{owner_->lifetime_, element_->id_, element_->generation_, slot};
+}
+
+template <fixed_string Name, RestorableStateValue T, class Formatter>
+StateHandle<std::decay_t<T>> BuildContext::restorable_state(T&& initial, std::string restoration_id,
+                                                            Formatter&& formatter) {
+  using Value = std::decay_t<T>;
+  using StateFormatter = std::decay_t<Formatter>;
+  static_assert(std::copy_constructible<StateFormatter>,
+                "DUI state inspector formatters must be copy constructible");
+  static_assert(std::invocable<const StateFormatter&, const Value&>,
+                "DUI state inspector formatters must accept const state references");
+  using Result = std::invoke_result_t<const StateFormatter&, const Value&>;
+  static_assert(std::constructible_from<std::string, Result>,
+                "DUI state inspector formatters must return string-constructible values");
+
+  auto handle = restorable_state<Name>(std::forward<T>(initial), std::move(restoration_id));
   BuildOwner::StateFormattingScope formatting{*owner_};
   constexpr auto slot = hash_name(Name.view());
   auto& state_slot = element_->state_.at(slot);

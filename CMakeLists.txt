@@ -71,6 +71,11 @@ if(DUI_BUILD_TESTS)
     dui_configure_target(dui_core_tests)
     add_test(NAME dui_core_tests COMMAND dui_core_tests)
 
+    add_executable(dui_restoration_tests tests/restoration_tests.cpp)
+    target_link_libraries(dui_restoration_tests PRIVATE dui::dui)
+    dui_configure_target(dui_restoration_tests)
+    add_test(NAME dui_restoration_tests COMMAND dui_restoration_tests)
+
     add_executable(dui_rendering_tests tests/rendering_tests.cpp)
     target_link_libraries(dui_rendering_tests PRIVATE dui::dui)
     dui_configure_target(dui_rendering_tests)
