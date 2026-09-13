@@ -783,6 +783,44 @@ fixed event/argument order, dropped counts, flow marker placement and hexadecima
 string IDs, zero-flow omission, locale independence, repeatable bytes, and
 malformed-event rejection while canonical DUI JSON bytes remain unchanged.
 
+The incremental-transport slice adds bounded polling over completed timeline
+events without introducing callbacks, sockets, or an executor dependency.
+`TimelineRecorder::read_completed(maxEvents, cursor)` returns a detached
+`TimelineBatch` containing events, the cursor for the next poll, and an exact
+`missedEventCount`. The default cursor starts at the recorder's first completion;
+`maxEvents` must be nonzero. Returned cursors are copyable opaque values tied by
+weak provenance to one recorder, do not retain it, and are rejected by a
+different recorder even if the source recorder has expired.
+
+Transport order is completion order, not `TimelineEvent::sequence` order. Span
+sequence is allocated at begin time, so sorting a live batch by sequence could
+advance past a lower-sequence span that remains in progress. Each completed span
+therefore receives a private recorder-local nonzero completion position while
+holding the same state lock that inserts it into the ring. The transport cursor
+names the next completion position to inspect; it is not serialized and does not
+change `TimelineEvent`, `TimelineSnapshot`, canonical JSON, or Trace Event JSON.
+Snapshot capture continues to sort detached events by start sequence.
+
+Ring overwrite advances a private retention floor. `clear()` empties the ring
+and advances that floor to the next completion position without resetting
+completion allocation. A span in progress during clear is retained if it
+finishes afterward because insertion is the completion linearization point. A
+stale cursor advances to the floor and reports the exact number of unavailable
+completions as `missedEventCount`, including when the retained ring is empty. A
+limited read advances only through returned events; an up-to-date read returns
+no events, no miss, and the same logical position. If the 64-bit completion
+position space is exhausted, incremental reads fail explicitly rather than
+wrapping or silently misdelivering, while ordinary bounded recording and
+snapshots continue.
+
+Read, finish, overwrite, and clear linearize under the recorder state mutex,
+while copying a batch invokes no clock and no user code. Acceptance covers
+initial and limited reads, completion-order delivery, overwrite and clear gaps,
+an in-flight completion across clear, empty polls, continued reads after gaps,
+cursor non-retention and recorder mismatch, zero limits, detached batch lifetime,
+concurrent UI/raster production with polling and clear, and unchanged
+snapshot/serialization behavior.
+
 ## Prototype acceptance criteria
 
 M0 is accepted when headless tests demonstrate:

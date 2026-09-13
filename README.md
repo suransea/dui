@@ -71,6 +71,9 @@ non-owning provenance token so matching raster work shares a cross-lane flow ID
 without conflating UI frame IDs with raster ticket IDs. Detached snapshots can
 also export Chrome/Perfetto Trace Event JSON with UI/raster tracks, complete
 spans, exact decimal microsecond timestamps, and visual cross-thread flow links.
+Tooling can poll bounded completion-order batches through recorder-local weak
+cursors; overwrite and clear gaps are reported exactly without retaining the
+recorder or invoking callbacks under its lock.
 
 Implemented layout Views include `VStack`, `HStack`, `Stack`, `Padding`,
 `ColoredBox`, `Viewport`, and `SliverToBoxAdapter`; primitives include `Text`

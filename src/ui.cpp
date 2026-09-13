@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <locale>
 #include <mutex>
 #include <ranges>
@@ -25,7 +26,7 @@ public:
 class TimelineRecorder::Impl {
 public:
   Impl(std::size_t capacity, std::shared_ptr<TimelineClock> clock)
-    : events_(capacity), clock_(std::move(clock)) {
+    : events_(capacity), completion_positions_(capacity), clock_(std::move(clock)) {
     if (capacity == 0) {
       throw std::invalid_argument("TimelineRecorder capacity must be positive");
     }
@@ -64,13 +65,23 @@ public:
     event.outcome = outcome;
     event.duration = end >= event.start ? end - event.start : std::chrono::nanoseconds{};
     std::lock_guard lock{state_mutex_};
+    const std::uint64_t completion_position = next_completion_position_;
+    if (next_completion_position_ == std::numeric_limits<std::uint64_t>::max()) {
+      completion_positions_exhausted_ = true;
+    } else {
+      ++next_completion_position_;
+    }
     if (event_count_ < events_.size()) {
-      events_[(first_event_ + event_count_) % events_.size()] = event;
+      const std::size_t insertion = (first_event_ + event_count_) % events_.size();
+      events_[insertion] = event;
+      completion_positions_[insertion] = completion_position;
       ++event_count_;
       return;
     }
     events_[first_event_] = event;
+    completion_positions_[first_event_] = completion_position;
     first_event_ = (first_event_ + 1) % events_.size();
+    retention_floor_ = completion_position - static_cast<std::uint64_t>(event_count_) + 1;
     ++dropped_event_count_;
   }
 
@@ -88,11 +99,50 @@ public:
     return result;
   }
 
+  struct CompletedRead {
+    std::vector<TimelineEvent> events;
+    std::uint64_t next_position{};
+    std::uint64_t missed_event_count{};
+  };
+
+  [[nodiscard]] CompletedRead read_completed(std::size_t max_events,
+                                             std::uint64_t requested_position) const {
+    if (max_events == 0) {
+      throw std::invalid_argument("Timeline incremental read limit must be positive");
+    }
+    std::lock_guard lock{state_mutex_};
+    if (completion_positions_exhausted_) {
+      throw std::overflow_error("Timeline incremental completion positions are exhausted");
+    }
+    if (requested_position == 0) {
+      requested_position = 1;
+    }
+    if (requested_position > next_completion_position_) {
+      throw std::invalid_argument("Timeline cursor is ahead of the recorder");
+    }
+    const std::uint64_t available_position = std::max(requested_position, retention_floor_);
+    CompletedRead result;
+    result.next_position = available_position;
+    result.missed_event_count = available_position - requested_position;
+    result.events.reserve(std::min(max_events, event_count_));
+    for (std::size_t index = 0; index < event_count_ && result.events.size() < max_events;
+         ++index) {
+      const std::size_t slot = (first_event_ + index) % events_.size();
+      if (completion_positions_[slot] < available_position) {
+        continue;
+      }
+      result.events.push_back(events_[slot]);
+      result.next_position = completion_positions_[slot] + 1;
+    }
+    return result;
+  }
+
   void clear() noexcept {
     std::lock_guard lock{state_mutex_};
     first_event_ = 0;
     event_count_ = 0;
     dropped_event_count_ = 0;
+    retention_floor_ = next_completion_position_;
   }
 
   [[nodiscard]] std::uint64_t next_frame_id() noexcept {
@@ -119,6 +169,7 @@ private:
   }
 
   std::vector<TimelineEvent> events_;
+  std::vector<std::uint64_t> completion_positions_;
   std::shared_ptr<TimelineClock> clock_;
   std::shared_ptr<const detail::TimelineFlowToken> flow_token_{
     std::make_shared<const detail::TimelineFlowToken>()};
@@ -131,6 +182,9 @@ private:
   std::uint64_t next_span_id_{1};
   std::uint64_t next_frame_id_{1};
   std::uint64_t next_flow_id_{1};
+  std::uint64_t next_completion_position_{1};
+  std::uint64_t retention_floor_{1};
+  bool completion_positions_exhausted_{};
 };
 
 TimelineRecorder::TimelineRecorder(std::size_t capacity)
@@ -142,6 +196,20 @@ TimelineRecorder::TimelineRecorder(std::size_t capacity, std::shared_ptr<Timelin
 TimelineRecorder::~TimelineRecorder() = default;
 
 TimelineSnapshot TimelineRecorder::snapshot() const { return impl_->snapshot(); }
+
+TimelineBatch TimelineRecorder::read_completed(std::size_t max_events,
+                                               const TimelineCursor& cursor) const {
+  const std::shared_ptr<const detail::TimelineFlowToken> token = impl_->flow_token();
+  if (cursor.next_completion_position_ != 0 &&
+      (cursor.recorder_token_.owner_before(token) || token.owner_before(cursor.recorder_token_))) {
+    throw std::invalid_argument("Timeline cursor belongs to a different recorder");
+  }
+  auto read = impl_->read_completed(max_events, cursor.next_completion_position_);
+  TimelineCursor next_cursor;
+  next_cursor.recorder_token_ = token;
+  next_cursor.next_completion_position_ = read.next_position;
+  return TimelineBatch{std::move(read.events), std::move(next_cursor), read.missed_event_count};
+}
 
 void TimelineRecorder::clear() noexcept { impl_->clear(); }
 

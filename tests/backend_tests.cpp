@@ -39,6 +39,40 @@ private:
   mutable std::size_t call_count_{};
 };
 
+class BlockingFinishTimelineClock final : public dui::TimelineClock {
+public:
+  std::chrono::nanoseconds now() const noexcept override {
+    std::unique_lock lock{mutex_};
+    if (call_count_++ == 0) {
+      return std::chrono::nanoseconds::zero();
+    }
+    finish_waiting_ = true;
+    ready_.notify_all();
+    ready_.wait(lock, [&] { return finish_released_; });
+    return std::chrono::nanoseconds{1};
+  }
+
+  [[nodiscard]] bool wait_for_finish() const {
+    std::unique_lock lock{mutex_};
+    return ready_.wait_for(lock, std::chrono::seconds{5}, [&] { return finish_waiting_; });
+  }
+
+  void release_finish() {
+    {
+      std::lock_guard lock{mutex_};
+      finish_released_ = true;
+    }
+    ready_.notify_all();
+  }
+
+private:
+  mutable std::mutex mutex_;
+  mutable std::condition_variable ready_;
+  mutable std::size_t call_count_{};
+  mutable bool finish_waiting_{};
+  bool finish_released_{};
+};
+
 struct FrameState {
   int presents{};
   int abandons{};
@@ -559,6 +593,26 @@ void raster_timeline_classifies_present_results_and_disabled_path() {
   }
 }
 
+void incremental_timeline_clear_linearizes_at_completion() {
+  auto clock = std::make_shared<BlockingFinishTimelineClock>();
+  auto timeline = std::make_shared<dui::TimelineRecorder>(4, clock);
+  const auto initial = timeline->read_completed(1);
+  dui::BuildOwner owner;
+  owner.set_timeline_recorder(timeline);
+  std::thread producer{[&] { owner.render(dui::Text{"finishes after clear"}); }};
+  const bool finish_waiting = clock->wait_for_finish();
+  timeline->clear();
+  clock->release_finish();
+  producer.join();
+  require(finish_waiting, "timeline producer did not reach its blocked completion point");
+
+  const auto completed = timeline->read_completed(1, initial.next_cursor);
+  require(completed.events.size() == 1 && completed.events[0].sequence == 1 &&
+            completed.events[0].phase == dui::TimelinePhase::reconcile &&
+            completed.missed_event_count == 0,
+          "timeline clear discarded or counted a span completed after its linearization point");
+}
+
 void timeline_recorder_supports_concurrent_ui_raster_observation_and_clear() {
   auto clock = std::make_shared<StepTimelineClock>();
   auto timeline = std::make_shared<dui::TimelineRecorder>(64, clock);
@@ -572,8 +626,11 @@ void timeline_recorder_supports_concurrent_ui_raster_observation_and_clear() {
   std::atomic<bool> done{};
   std::atomic<bool> invalid{};
   std::thread observer{[&] {
+    dui::TimelineCursor cursor;
     while (!done.load()) {
       const auto snapshot = timeline->snapshot();
+      const auto batch = timeline->read_completed(16, cursor);
+      cursor = batch.next_cursor;
       try {
         static_cast<void>(snapshot.to_json());
       } catch (...) {
@@ -585,6 +642,12 @@ void timeline_recorder_supports_concurrent_ui_raster_observation_and_clear() {
             (event.lane == dui::TimelineLane::raster &&
              (event.flow_id == 0 ||
               (event.phase != dui::TimelinePhase::raster_frame && event.parent_span_id == 0)))) {
+          invalid.store(true);
+        }
+      }
+      for (const auto& event : batch.events) {
+        if (event.sequence == 0 || event.span_id == 0 ||
+            event.duration < std::chrono::nanoseconds::zero()) {
           invalid.store(true);
         }
       }
@@ -710,6 +773,7 @@ int main() {
     queued_cancellation_emits_no_raster_timeline_event();
     raster_thread_classifies_surface_acquisition_results();
     raster_timeline_classifies_present_results_and_disabled_path();
+    incremental_timeline_clear_linearizes_at_completion();
     timeline_recorder_supports_concurrent_ui_raster_observation_and_clear();
     raster_timeline_correlates_only_matching_recorder_provenance();
   } catch (const std::exception& error) {

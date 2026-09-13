@@ -293,6 +293,23 @@ struct TimelineSnapshot {
   friend bool operator==(const TimelineSnapshot&, const TimelineSnapshot&) = default;
 };
 
+class TimelineCursor final {
+public:
+  TimelineCursor() = default;
+
+private:
+  friend class TimelineRecorder;
+
+  std::weak_ptr<const detail::TimelineFlowToken> recorder_token_;
+  std::uint64_t next_completion_position_{};
+};
+
+struct TimelineBatch {
+  std::vector<TimelineEvent> events;
+  TimelineCursor next_cursor;
+  std::uint64_t missed_event_count{};
+};
+
 class TimelineClock {
 public:
   virtual ~TimelineClock() = default;
@@ -311,6 +328,8 @@ public:
   TimelineRecorder& operator=(TimelineRecorder&&) = delete;
 
   [[nodiscard]] TimelineSnapshot snapshot() const;
+  [[nodiscard]] TimelineBatch read_completed(std::size_t max_events,
+                                             const TimelineCursor& cursor = {}) const;
   void clear() noexcept;
 
 private:

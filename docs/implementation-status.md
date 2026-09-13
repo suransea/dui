@@ -320,7 +320,8 @@ technology observation remain target-OS work.
 
 Status: structured-inspector, concurrent UI/raster timeline collection,
 cross-lane flow correlation, canonical timeline serialization, and
-Chrome/Perfetto trace-export slices implemented and verified.
+Chrome/Perfetto trace-export and incremental-transport slices implemented and
+verified.
 
 `BuildOwner::inspect()` now captures an owned, passive Element-tree snapshot.
 Each node records stable identity/generation, depth, name/value/key, active or
@@ -336,8 +337,8 @@ malformed bytes become deterministic `U+FFFD` escapes, and capture/serialization
 enforce a 512-node depth bound while lookup remains iterative. Existing
 `dump_tree()` output remains compatible. Tests cover empty, dirty, framed,
 keyed, focused, escaped/malformed UTF-8, bounded deep, deterministic, owner-
-independent, reentrancy-rejected, and dormant Sliver snapshots. Timeline live
-transport, opt-in value inspection, and GUI tooling remain pending.
+independent, reentrancy-rejected, and dormant Sliver snapshots. Opt-in value
+inspection and GUI tooling remain pending.
 
 The initial timeline slice adds an opt-in, fixed-capacity `TimelineRecorder`
 with a steady default clock and injectable monotonic clocks. `BuildOwner`
@@ -352,8 +353,7 @@ an exact drop count, and snapshots remain valid after recorder and owner
 destruction. Tests use fake clocks to cover exact timing and nesting, disabled
 clock reads, dirty and clean work counts, failure recovery, bounded overflow,
 clear without ID reuse, and all successful sixteen-pass and rejected
-seventeen-pass lazy stabilization phases. Live transport and timeline GUI
-tooling remain pending.
+seventeen-pass lazy stabilization phases. Timeline GUI tooling remains pending.
 
 `TimelineSnapshot::to_json()` now emits versioned canonical DUI JSON with fixed
 root and event field order, classic-locale base-10 integers, nanosecond timing,
@@ -407,6 +407,21 @@ phase and outcome, fixed field order, unordered signed origins, sub-microsecond
 and exact boundary times, out-of-window rejection, dropped counts, marker
 placement, zero/nested marker omission, locale independence, repeated output,
 and malformed event rejection.
+
+The incremental-transport slice adds `TimelineRecorder::read_completed()` for
+bounded polling without callbacks or executor coupling. Opaque copyable cursors
+carry weak recorder provenance and never retain their source. Batches are
+detached and preserve completion order, avoiding loss when a lower-sequence span
+finishes after a higher-sequence span; ordinary snapshots remain sorted by start
+sequence. Private completion positions and a retention floor make ring overwrite
+and `clear()` gaps exact, including empty post-clear reads. Reads linearize with
+finish and clear under the existing state mutex and perform no clock or user-code
+calls. Completion-position exhaustion rejects incremental reads instead of
+wrapping while ordinary snapshots continue. Tests cover completion versus
+snapshot ordering, pagination, empty polls, overwrite and clear gaps, an
+in-flight finish after clear, continued and late readers, zero limits, foreign
+and expired cursors, detached lifetime, and concurrent UI/raster polling with
+clear.
 
 ## Verification
 

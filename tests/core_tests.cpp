@@ -848,6 +848,94 @@ void timeline_recorder_is_deterministic_bounded_and_failure_safe() {
           "timeline ring did not evict nested spans by completion before start-order sorting");
 }
 
+void timeline_recorder_streams_completed_batches() {
+  auto completion_recorder =
+    std::make_shared<dui::TimelineRecorder>(8, std::make_shared<StepTimelineClock>());
+  dui::BuildOwner completion_owner;
+  completion_owner.set_timeline_recorder(completion_recorder);
+  completion_owner.render(dui::Text{"completion order"});
+  static_cast<void>(completion_owner.layer_frame(dui::BoxConstraints::tight({80.0, 16.0})));
+  const auto completion_snapshot = completion_recorder->snapshot();
+  const auto completion_batch = completion_recorder->read_completed(8);
+  require(completion_snapshot.events.size() == 6 && completion_batch.events.size() == 6 &&
+            completion_snapshot.events[1].phase == dui::TimelinePhase::frame &&
+            completion_batch.events.back().phase == dui::TimelinePhase::frame &&
+            completion_batch.missed_event_count == 0,
+          "incremental timeline read did not preserve completion order separately from snapshots");
+
+  bool zero_limit_rejected = false;
+  try {
+    static_cast<void>(completion_recorder->read_completed(0));
+  } catch (const std::invalid_argument&) {
+    zero_limit_rejected = true;
+  }
+  require(zero_limit_rejected, "incremental timeline read accepted a zero limit");
+
+  auto recorder = std::make_shared<dui::TimelineRecorder>(3, std::make_shared<StepTimelineClock>());
+  dui::BuildOwner owner;
+  owner.set_timeline_recorder(recorder);
+  owner.render(dui::Text{"one"});
+  owner.render(dui::Text{"two"});
+  auto first = recorder->read_completed(1);
+  require(first.events.size() == 1 && first.events[0].sequence == 1 &&
+            first.missed_event_count == 0,
+          "initial incremental timeline page was incorrect");
+
+  owner.render(dui::Text{"three"});
+  owner.render(dui::Text{"four"});
+  owner.render(dui::Text{"five"});
+  auto overflow = recorder->read_completed(2, first.next_cursor);
+  require(overflow.events.size() == 2 && overflow.events[0].sequence == 3 &&
+            overflow.events[1].sequence == 4 && overflow.missed_event_count == 1,
+          "incremental timeline read did not report an exact overwrite gap");
+  auto remainder = recorder->read_completed(2, overflow.next_cursor);
+  require(remainder.events.size() == 1 && remainder.events[0].sequence == 5 &&
+            remainder.missed_event_count == 0,
+          "limited incremental timeline read skipped its remaining event");
+  const auto empty = recorder->read_completed(2, remainder.next_cursor);
+  require(empty.events.empty() && empty.missed_event_count == 0,
+          "up-to-date incremental timeline read was not empty");
+
+  owner.render(dui::Text{"six"});
+  recorder->clear();
+  auto cleared = recorder->read_completed(2, remainder.next_cursor);
+  require(cleared.events.empty() && cleared.missed_event_count == 1,
+          "incremental timeline read did not report an empty clear gap");
+  owner.render(dui::Text{"seven"});
+  auto continued = recorder->read_completed(2, cleared.next_cursor);
+  require(continued.events.size() == 1 && continued.events[0].sequence == 7 &&
+            continued.missed_event_count == 0,
+          "incremental timeline read did not continue after a clear gap");
+  const auto late_reader = recorder->read_completed(2);
+  require(late_reader.events.size() == 1 && late_reader.events[0].sequence == 7 &&
+            late_reader.missed_event_count == 6,
+          "a fresh incremental reader did not report unavailable history");
+
+  auto other = std::make_shared<dui::TimelineRecorder>(2, std::make_shared<StepTimelineClock>());
+  bool mismatched_cursor_rejected = false;
+  try {
+    static_cast<void>(other->read_completed(1, continued.next_cursor));
+  } catch (const std::invalid_argument&) {
+    mismatched_cursor_rejected = true;
+  }
+  require(mismatched_cursor_rejected, "incremental timeline accepted a foreign cursor");
+
+  std::weak_ptr<dui::TimelineRecorder> recorder_lifetime = recorder;
+  const auto detached = std::move(continued);
+  owner.set_timeline_recorder(nullptr);
+  recorder.reset();
+  require(recorder_lifetime.expired() && detached.events.size() == 1 &&
+            detached.events[0].sequence == 7,
+          "incremental timeline cursor retained its recorder or batch storage was not detached");
+  bool expired_cursor_rejected = false;
+  try {
+    static_cast<void>(other->read_completed(1, detached.next_cursor));
+  } catch (const std::invalid_argument&) {
+    expired_cursor_rejected = true;
+  }
+  require(expired_cursor_rejected, "incremental timeline accepted an expired foreign cursor");
+}
+
 class GroupedNumberPunctuation final : public std::numpunct<char> {
 private:
   char do_thousands_sep() const override { return '_'; }
@@ -1170,6 +1258,7 @@ int main() {
     tree_dump_is_deterministic();
     structured_inspector_is_detached_and_deterministic();
     timeline_recorder_is_deterministic_bounded_and_failure_safe();
+    timeline_recorder_streams_completed_batches();
     timeline_json_is_canonical_and_strict();
     duplicate_keys_are_rejected();
   } catch (const std::exception& error) {
