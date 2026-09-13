@@ -316,6 +316,28 @@ transfer, clearing, stale/disabled action rejection, focus diff records, and
 malformed multiple-focus transactionality. Native UIA focus-event and assistive-
 technology observation remain target-OS work.
 
+## M4: Tooling and Platforms
+
+Status: initial structured-inspector slice implemented and verified.
+
+`BuildOwner::inspect()` now captures an owned, passive Element-tree snapshot.
+Each node records stable identity/generation, depth, name/value/key, active or
+dormant keep-alive state, update/dirty state, safe state/dependency/environment/
+resource counts, focus ownership, and optional RenderObject protocol, dirty,
+boundary, and layout/paint-counter metadata. Active reconciliation order and
+dormant oldest-to-newest order are preserved, with dormant state propagated
+through retained descendants. Snapshots retain no Elements, RenderObjects,
+arbitrary `std::any` values, callbacks, resources, or native handles; they remain
+valid after updates and owner destruction. Tree-wide ID lookup and canonical
+locale-independent JSON serialization are included; valid UTF-8 is preserved,
+malformed bytes become deterministic `U+FFFD` escapes, and capture/serialization
+enforce a 512-node depth bound while lookup remains iterative. Existing
+`dump_tree()` output remains compatible. Tests cover empty, dirty, framed,
+keyed, focused, escaped/malformed UTF-8, bounded deep, deterministic, owner-
+independent, reentrancy-rejected, and dormant Sliver snapshots. Timeline
+collection, live transport, opt-in value inspection, and GUI tooling remain
+pending.
+
 ## Verification
 
 The prototype has been built and tested with:

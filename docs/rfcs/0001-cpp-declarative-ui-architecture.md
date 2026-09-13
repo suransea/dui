@@ -596,6 +596,29 @@ coordinator can schedule retry with current metrics.
 - stable plugin ABI experiments
 - Android, iOS, Windows, macOS, and Linux hosts
 
+M4 begins with a platform-neutral structured inspector. `BuildOwner::inspect()`
+returns an owned value snapshot containing Element ID and generation, depth,
+name, debug value, key, update and dirty state, state/dependency/environment/
+resource counts, focus-node ownership, active versus dormant keep-alive state,
+and optional RenderObject identity, protocol, dirty flags, repaint-boundary
+status, and layout/paint counters. Active children retain reconciliation order;
+dormant lazy children follow in their deterministic oldest-to-newest retention
+order, and the dormant marker propagates through their descendants. Arbitrary
+`std::any` state, environment values, resources, callbacks, framework pointers,
+and native handles are never retained or serialized. Capture is passive: it
+does not flush builds, perform layout, paint, or invoke user code, and rejects
+capture during reconciliation or framing rather than exposing a partial tree.
+The detached snapshot remains valid after updates or owner destruction, supports
+tree-wide stable-ID lookup, and has canonical JSON serialization with fixed
+field order, locale-independent numbers, complete control-character escaping,
+preserved valid UTF-8, and deterministic `U+FFFD` replacement for malformed
+bytes. Capture and serialization reject nesting at the documented 512-node
+depth bound with `length_error`; lookup uses an iterative traversal. Empty-owner,
+active-tree, dirty-tree, keyed, focus, RenderObject, dormant keep-alive,
+snapshot-lifetime, lookup, escaping, and deterministic repeated-capture cases
+form acceptance. Timeline events, live transport, state-value opt-in, and a GUI
+frontend remain later tooling slices.
+
 ## Prototype acceptance criteria
 
 M0 is accepted when headless tests demonstrate:

@@ -53,6 +53,13 @@ struct Counter {
 See [RFC 0001](docs/rfcs/0001-cpp-declarative-ui-architecture.md) for the
 architecture and implementation roadmap.
 
+`BuildOwner::inspect()` captures a detached structured snapshot for tooling
+without flushing or framing the tree. It includes active and dormant Elements,
+identity and lifecycle metadata, safe state/dependency/resource counts, focus
+ownership, and RenderObject protocol/dirty/counter metadata. Snapshots support
+stable-ID lookup and canonical JSON serialization while retaining no framework
+or native pointers.
+
 Implemented layout Views include `VStack`, `HStack`, `Stack`, `Padding`,
 `ColoredBox`, `Viewport`, and `SliverToBoxAdapter`; primitives include `Text`
 and `Image`. `SliverFixedExtentList` provides the first scrolling-list protocol.

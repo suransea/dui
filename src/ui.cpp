@@ -1,7 +1,9 @@
 #include "dui/ui.hpp"
 
 #include <algorithm>
+#include <locale>
 #include <ranges>
+#include <string_view>
 #include <utility>
 
 namespace dui {
@@ -442,6 +444,158 @@ void BuildContext::observe(DependencySource& dependency) {
 
 namespace {
 
+void append_json_string(std::ostringstream& output, std::string_view value) {
+  constexpr char hex[] = "0123456789abcdef";
+  output << '"';
+  for (std::size_t index = 0; index < value.size();) {
+    const auto character = static_cast<unsigned char>(value[index]);
+    if (character >= 0x80u) {
+      std::size_t length = 0;
+      bool valid_second = true;
+      if (character >= 0xc2u && character <= 0xdfu) {
+        length = 2;
+      } else if (character >= 0xe0u && character <= 0xefu) {
+        length = 3;
+        if (index + 1 < value.size()) {
+          const auto second = static_cast<unsigned char>(value[index + 1]);
+          valid_second = character == 0xe0u   ? second >= 0xa0u && second <= 0xbfu
+                         : character == 0xedu ? second >= 0x80u && second <= 0x9fu
+                                              : second >= 0x80u && second <= 0xbfu;
+        }
+      } else if (character >= 0xf0u && character <= 0xf4u) {
+        length = 4;
+        if (index + 1 < value.size()) {
+          const auto second = static_cast<unsigned char>(value[index + 1]);
+          valid_second = character == 0xf0u   ? second >= 0x90u && second <= 0xbfu
+                         : character == 0xf4u ? second >= 0x80u && second <= 0x8fu
+                                              : second >= 0x80u && second <= 0xbfu;
+        }
+      }
+      bool valid = length != 0 && index + length <= value.size() && valid_second;
+      for (std::size_t continuation = 1; valid && continuation < length; ++continuation) {
+        const auto byte = static_cast<unsigned char>(value[index + continuation]);
+        valid = byte >= 0x80u && byte <= 0xbfu;
+      }
+      if (!valid) {
+        output << "\\ufffd";
+        ++index;
+        continue;
+      }
+      output.write(value.data() + index, static_cast<std::streamsize>(length));
+      index += length;
+      continue;
+    }
+    switch (character) {
+    case '"':
+      output << "\\\"";
+      break;
+    case '\\':
+      output << "\\\\";
+      break;
+    case '\b':
+      output << "\\b";
+      break;
+    case '\f':
+      output << "\\f";
+      break;
+    case '\n':
+      output << "\\n";
+      break;
+    case '\r':
+      output << "\\r";
+      break;
+    case '\t':
+      output << "\\t";
+      break;
+    default:
+      if (character < 0x20u) {
+        output << "\\u00" << hex[character >> 4u] << hex[character & 0x0fu];
+      } else {
+        output << static_cast<char>(character);
+      }
+      break;
+    }
+    ++index;
+  }
+  output << '"';
+}
+
+void append_json_bool(std::ostringstream& output, bool value) {
+  output << (value ? "true" : "false");
+}
+
+std::string_view inspector_state_name(InspectorElementState state) {
+  switch (state) {
+  case InspectorElementState::active:
+    return "active";
+  case InspectorElementState::dormant_keep_alive:
+    return "dormantKeepAlive";
+  }
+  return "active";
+}
+
+std::string_view inspector_protocol_name(InspectorRenderProtocol protocol) {
+  switch (protocol) {
+  case InspectorRenderProtocol::object:
+    return "object";
+  case InspectorRenderProtocol::box:
+    return "box";
+  case InspectorRenderProtocol::sliver:
+    return "sliver";
+  }
+  return "object";
+}
+
+void append_json_node(std::ostringstream& output, const InspectorNode& node, std::size_t depth) {
+  if (depth >= InspectorSnapshot::maximum_depth) {
+    throw std::length_error("Inspector snapshot exceeds its maximum serialization depth");
+  }
+  output << "{\"id\":" << node.id << ",\"generation\":" << node.generation
+         << ",\"depth\":" << node.depth << ",\"name\":";
+  append_json_string(output, node.name);
+  output << ",\"value\":";
+  append_json_string(output, node.value);
+  output << ",\"key\":";
+  append_json_string(output, node.key);
+  output << ",\"state\":";
+  append_json_string(output, inspector_state_name(node.state));
+  output << ",\"updateCount\":" << node.update_count << ",\"dirty\":";
+  append_json_bool(output, node.dirty);
+  output << ",\"stateSlotCount\":" << node.state_slot_count
+         << ",\"dependencyCount\":" << node.dependency_count
+         << ",\"environmentCount\":" << node.environment_count
+         << ",\"resourceCount\":" << node.resource_count << ",\"hasFocusNode\":";
+  append_json_bool(output, node.has_focus_node);
+  output << ",\"focused\":";
+  append_json_bool(output, node.focused);
+  output << ",\"renderObject\":";
+  if (!node.render_object.has_value()) {
+    output << "null";
+  } else {
+    const InspectorRenderSnapshot& render = *node.render_object;
+    output << "{\"id\":" << render.id << ",\"protocol\":";
+    append_json_string(output, inspector_protocol_name(render.protocol));
+    output << ",\"needsLayout\":";
+    append_json_bool(output, render.needs_layout);
+    output << ",\"needsPaint\":";
+    append_json_bool(output, render.needs_paint);
+    output << ",\"needsCompositing\":";
+    append_json_bool(output, render.needs_compositing);
+    output << ",\"repaintBoundary\":";
+    append_json_bool(output, render.repaint_boundary);
+    output << ",\"layoutCount\":" << render.layout_count << ",\"paintCount\":" << render.paint_count
+           << '}';
+  }
+  output << ",\"children\":[";
+  for (std::size_t index = 0; index < node.children.size(); ++index) {
+    if (index != 0) {
+      output << ',';
+    }
+    append_json_node(output, node.children[index], depth + 1);
+  }
+  output << "]}";
+}
+
 void append_tree(const Element& element, std::ostringstream& output, std::size_t indent) {
   output << std::string(indent, ' ') << element.debug_name() << '#' << element.id();
   if (!element.key().empty()) {
@@ -460,6 +614,115 @@ void append_tree(const Element& element, std::ostringstream& output, std::size_t
 }
 
 } // namespace
+
+const InspectorNode* InspectorNode::find(Element::Id search_id) const {
+  std::vector<const InspectorNode*> pending{this};
+  while (!pending.empty()) {
+    const InspectorNode* node = pending.back();
+    pending.pop_back();
+    if (node->id == search_id) {
+      return node;
+    }
+    for (auto child = node->children.rbegin(); child != node->children.rend(); ++child) {
+      pending.push_back(&*child);
+    }
+  }
+  return nullptr;
+}
+
+const InspectorNode* InspectorSnapshot::find(Element::Id id) const {
+  return root.has_value() ? root->find(id) : nullptr;
+}
+
+std::string InspectorSnapshot::to_json() const {
+  std::ostringstream output;
+  output.imbue(std::locale::classic());
+  output << "{\"mountCount\":" << mount_count << ",\"unmountCount\":" << unmount_count
+         << ",\"pendingBuildCount\":" << pending_build_count
+         << ",\"pendingLayoutCount\":" << pending_layout_count
+         << ",\"pendingPaintCount\":" << pending_paint_count
+         << ",\"pendingCompositingCount\":" << pending_compositing_count << ",\"root\":";
+  if (root.has_value()) {
+    append_json_node(output, *root, 0);
+  } else {
+    output << "null";
+  }
+  output << '}';
+  return std::move(output).str();
+}
+
+InspectorSnapshot BuildOwner::inspect() const {
+  if (reconciling_ || framing_) {
+    throw std::logic_error("BuildOwner cannot be inspected during reconciliation or framing");
+  }
+
+  InspectorSnapshot snapshot{mount_count_,
+                             unmount_count_,
+                             dirty_.size(),
+                             render_owner_.pending_layout_count(),
+                             render_owner_.pending_paint_count(),
+                             render_owner_.pending_compositing_count(),
+                             std::nullopt};
+  const std::shared_ptr<FocusNode> focused_node = focus_manager_.focused_node();
+  const auto collect = [&](auto&& self, const Element& element, InspectorElementState state,
+                           std::size_t traversal_depth) -> InspectorNode {
+    if (traversal_depth >= InspectorSnapshot::maximum_depth) {
+      throw std::length_error("Element tree exceeds the inspector maximum depth");
+    }
+    std::optional<InspectorRenderSnapshot> render_snapshot;
+    if (const RenderObject* render = element.render_object_.get(); render != nullptr) {
+      InspectorRenderProtocol protocol = InspectorRenderProtocol::object;
+      if (dynamic_cast<const RenderBox*>(render) != nullptr) {
+        protocol = InspectorRenderProtocol::box;
+      } else if (dynamic_cast<const RenderSliver*>(render) != nullptr) {
+        protocol = InspectorRenderProtocol::sliver;
+      }
+      render_snapshot = InspectorRenderSnapshot{render->id(),
+                                                protocol,
+                                                render->needs_layout(),
+                                                render->needs_paint(),
+                                                render->needs_compositing(),
+                                                render->is_repaint_boundary(),
+                                                render->layout_count(),
+                                                render->paint_count()};
+    }
+
+    InspectorNode node{element.id_,
+                       element.generation_,
+                       element.depth_,
+                       element.debug_name_,
+                       element.debug_value_,
+                       element.key_.empty() ? std::string{} : element.key_.to_string(),
+                       state,
+                       element.update_count_,
+                       element.dirty_,
+                       element.state_.size(),
+                       element.dependencies_.size(),
+                       element.environment_.size(),
+                       element.resources_.size(),
+                       element.focus_node_ != nullptr,
+                       element.focus_node_ != nullptr && element.focus_node_ == focused_node,
+                       std::move(render_snapshot),
+                       {}};
+    node.children.reserve(element.children_.size() + element.lazy_kept_alive_children_.size());
+    for (const auto& child : element.children_) {
+      if (child != nullptr) {
+        node.children.push_back(self(self, *child, state, traversal_depth + 1));
+      }
+    }
+    for (const auto& child : element.lazy_kept_alive_children_) {
+      if (child != nullptr) {
+        node.children.push_back(
+          self(self, *child, InspectorElementState::dormant_keep_alive, traversal_depth + 1));
+      }
+    }
+    return node;
+  };
+  if (root_ != nullptr) {
+    snapshot.root = collect(collect, *root_, InspectorElementState::active, 0);
+  }
+  return snapshot;
+}
 
 std::string BuildOwner::dump_tree() const {
   std::ostringstream output;

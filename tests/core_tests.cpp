@@ -530,6 +530,131 @@ void tree_dump_is_deterministic() {
   require(owner.dump_tree() == expected, "tree inspection output is not deterministic");
 }
 
+struct InspectorComponent {
+  dui::Signal<int>* signal;
+
+  auto build(dui::BuildContext& context) const {
+    auto state = context.state<"inspector-state">(2);
+    auto& resource = context.resource<"inspector-resource">([] { return 3; });
+    const int total = state.get() + signal->get() + resource;
+    return dui::FocusView<dui::Text>{
+      dui::Text{context.environment<std::string>() + "=\"" + std::to_string(total) + "\"\\\n"},
+      {},
+      true,
+      true};
+  }
+};
+
+struct InspectDuringBuild {
+  dui::BuildOwner* owner;
+  bool* rejected;
+
+  auto build(dui::BuildContext&) const {
+    try {
+      static_cast<void>(owner->inspect());
+    } catch (const std::logic_error&) {
+      *rejected = true;
+    }
+    return dui::Text{"safe"};
+  }
+};
+
+void structured_inspector_is_detached_and_deterministic() {
+  dui::BuildOwner owner;
+  const auto empty = owner.inspect();
+  require(!empty.root.has_value() && empty.mount_count == 0 && empty.find(1) == nullptr &&
+            empty.to_json().contains("\"root\":null"),
+          "empty BuildOwner inspection was not canonical");
+
+  dui::Signal<int> signal{4};
+  owner.render(dui::with_environment(InspectorComponent{&signal}, std::string{"value"}));
+  const auto dirty = owner.inspect();
+  require(dirty.root.has_value() && dirty.root->environment_count == 1 &&
+            dirty.root->children.size() == 1 &&
+            dirty.root->children.front().state_slot_count == 1 &&
+            dirty.root->children.front().dependency_count == 2 &&
+            dirty.root->children.front().resource_count == 1 &&
+            dirty.root->children.front().children.size() == 1 &&
+            dirty.root->children.front().children.front().has_focus_node &&
+            dirty.root->children.front().children.front().focused &&
+            dirty.root->children.front().children.front().render_object.has_value() &&
+            dirty.root->children.front().children.front().render_object->protocol ==
+              dui::InspectorRenderProtocol::box &&
+            dirty.root->children.front().children.front().render_object->needs_layout &&
+            dirty.pending_layout_count != 0,
+          "dirty inspector snapshot omitted owner, focus, or RenderObject metadata");
+  const auto text_id = dirty.root->children.front().children.front().children.front().id;
+  require(dirty.find(text_id) != nullptr && dirty.find(text_id)->value == "value=\"9\"\\\n" &&
+            dirty.find(999999) == nullptr,
+          "inspector stable-ID lookup did not find the nested debug value");
+  const std::string dirty_json = dirty.to_json();
+  require(dirty_json == owner.inspect().to_json() && dirty_json.contains("value=\\\"9\\\"\\\\\\n"),
+          "inspector JSON was nondeterministic or failed to escape debug text");
+
+  [[maybe_unused]] const auto frame = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
+  const auto framed = owner.inspect();
+  const auto* framed_text = framed.find(text_id);
+  require(framed_text != nullptr && framed_text->render_object.has_value() &&
+            !framed_text->render_object->needs_layout && !framed_text->render_object->needs_paint &&
+            framed_text->render_object->layout_count == 1 &&
+            framed_text->render_object->paint_count == 1,
+          "framed inspector snapshot did not report drained render state");
+
+  const auto detached = framed;
+  owner.render(dui::ForEach{std::vector<Item>{{7, "replacement"}}, dui::key<&Item::id>,
+                            [](const Item& item) { return dui::Text{item.label}; }});
+  const auto keyed = owner.inspect();
+  require(keyed.root.has_value() && keyed.root->children.size() == 1 &&
+            keyed.root->children.front().key == "7" && detached.find(text_id) != nullptr &&
+            detached.find(text_id)->value == "value=\"9\"\\\n",
+          "inspector key metadata or detached snapshot lifetime was incorrect");
+
+  bool reentrant_rejected = false;
+  owner.render(InspectDuringBuild{&owner, &reentrant_rejected});
+  require(reentrant_rejected, "inspector exposed a partially reconciled tree during build");
+
+  dui::InspectorSnapshot surviving_snapshot;
+  dui::Element::Id surviving_id{};
+  {
+    dui::BuildOwner temporary_owner;
+    temporary_owner.render(dui::Text{"survives owner"});
+    surviving_id = temporary_owner.root()->id();
+    surviving_snapshot = temporary_owner.inspect();
+  }
+  require(surviving_snapshot.find(surviving_id) != nullptr &&
+            surviving_snapshot.find(surviving_id)->value == "survives owner",
+          "inspector snapshot retained owner-dependent storage");
+
+  dui::InspectorSnapshot encoded;
+  encoded.root.emplace();
+  encoded.root->id = 1;
+  encoded.root->value =
+    std::string{"\xe4\xb8\xad"} + static_cast<char>(0x80) + std::string{"\x01\b\f\r\t"};
+  const std::string encoded_json = encoded.to_json();
+  require(encoded_json.contains("\xe4\xb8\xad") && encoded_json.contains("\\ufffd") &&
+            encoded_json.contains("\\u0001\\b\\f\\r\\t"),
+          "inspector JSON did not preserve UTF-8 or normalize malformed/control bytes");
+
+  dui::InspectorSnapshot deep;
+  deep.root.emplace();
+  deep.root->id = 1;
+  dui::InspectorNode* cursor = &*deep.root;
+  for (std::size_t depth = 1; depth <= dui::InspectorSnapshot::maximum_depth; ++depth) {
+    cursor->children.emplace_back();
+    cursor = &cursor->children.back();
+    cursor->id = depth + 1;
+  }
+  require(deep.find(dui::InspectorSnapshot::maximum_depth + 1) != nullptr,
+          "iterative inspector lookup failed on a deep snapshot");
+  bool deep_json_rejected = false;
+  try {
+    static_cast<void>(deep.to_json());
+  } catch (const std::length_error&) {
+    deep_json_rejected = true;
+  }
+  require(deep_json_rejected, "inspector serialized beyond its safe maximum depth");
+}
+
 void duplicate_keys_are_rejected() {
   dui::BuildOwner owner;
   owner.render(ItemList{{{1, "original"}}});
@@ -568,6 +693,7 @@ int main() {
     stale_state_handle_is_rejected();
     state_handle_rejects_destroyed_owner();
     tree_dump_is_deterministic();
+    structured_inspector_is_detached_and_deterministic();
     duplicate_keys_are_rejected();
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';

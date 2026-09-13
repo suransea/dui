@@ -1313,6 +1313,18 @@ void lazy_keep_alive_preserves_state_outside_the_cache_range() {
   require(list_element->kept_alive_child_count() == 1 && builder_calls == 2 &&
             !handles[3].has_value(),
           "never-realized policy-selected item entered the keep-alive bucket");
+  const auto dormant_snapshot = owner.inspect();
+  const auto* inspected_list = dormant_snapshot.find(list_element->id());
+  require(inspected_list != nullptr && inspected_list->render_object.has_value() &&
+            inspected_list->render_object->protocol == dui::InspectorRenderProtocol::sliver &&
+            inspected_list->children.size() == 2 && inspected_list->children[0].key == "2" &&
+            inspected_list->children[0].state == dui::InspectorElementState::active &&
+            inspected_list->children[1].key == "1" &&
+            inspected_list->children[1].state == dui::InspectorElementState::dormant_keep_alive &&
+            !inspected_list->children[1].children.empty() &&
+            inspected_list->children[1].children.front().state ==
+              dui::InspectorElementState::dormant_keep_alive,
+          "structured inspector omitted or reordered a dormant keep-alive subtree");
 
   handles[1]->set(42);
   keep_alive_signal.set(7);
@@ -1323,7 +1335,9 @@ void lazy_keep_alive_preserves_state_outside_the_cache_range() {
           "dormant state was discarded or painted while detached");
   require(owner.focused_node() != nullptr && owner.focused_node()->id() == focused_id &&
             owner.dispatch_key({"A", dui::KeyPhase::down}) == dui::KeyEventResult::handled &&
-            key_events == 1,
+            key_events == 1 && dormant_snapshot.find(retained_id) != nullptr &&
+            dormant_snapshot.find(retained_id)->state ==
+              dui::InspectorElementState::dormant_keep_alive,
           "dormant keep-alive item lost focused key dispatch");
 
   std::vector<Item> duplicate = items;

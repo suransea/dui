@@ -188,6 +188,64 @@ private:
   std::shared_ptr<FocusNode> focus_node_;
 };
 
+enum class InspectorElementState { active, dormant_keep_alive };
+
+enum class InspectorRenderProtocol { object, box, sliver };
+
+struct InspectorRenderSnapshot {
+  RenderObject::Id id{};
+  InspectorRenderProtocol protocol{InspectorRenderProtocol::object};
+  bool needs_layout{};
+  bool needs_paint{};
+  bool needs_compositing{};
+  bool repaint_boundary{};
+  std::size_t layout_count{};
+  std::size_t paint_count{};
+
+  friend bool operator==(const InspectorRenderSnapshot&, const InspectorRenderSnapshot&) = default;
+};
+
+struct InspectorNode {
+  Element::Id id{};
+  std::uint64_t generation{};
+  std::size_t depth{};
+  std::string name;
+  std::string value;
+  std::string key;
+  InspectorElementState state{InspectorElementState::active};
+  std::size_t update_count{};
+  bool dirty{};
+  std::size_t state_slot_count{};
+  std::size_t dependency_count{};
+  std::size_t environment_count{};
+  std::size_t resource_count{};
+  bool has_focus_node{};
+  bool focused{};
+  std::optional<InspectorRenderSnapshot> render_object;
+  std::vector<InspectorNode> children;
+
+  [[nodiscard]] const InspectorNode* find(Element::Id id) const;
+
+  friend bool operator==(const InspectorNode&, const InspectorNode&) = default;
+};
+
+struct InspectorSnapshot {
+  static constexpr std::size_t maximum_depth = 512;
+
+  std::size_t mount_count{};
+  std::size_t unmount_count{};
+  std::size_t pending_build_count{};
+  std::size_t pending_layout_count{};
+  std::size_t pending_paint_count{};
+  std::size_t pending_compositing_count{};
+  std::optional<InspectorNode> root;
+
+  [[nodiscard]] const InspectorNode* find(Element::Id id) const;
+  [[nodiscard]] std::string to_json() const;
+
+  friend bool operator==(const InspectorSnapshot&, const InspectorSnapshot&) = default;
+};
+
 class BuildOwner {
 public:
   enum class PointerPhase { down, move, up, cancel };
@@ -222,6 +280,7 @@ public:
 
   [[nodiscard]] const Element* root() const { return root_.get(); }
   [[nodiscard]] Element* root() { return root_.get(); }
+  [[nodiscard]] InspectorSnapshot inspect() const;
   [[nodiscard]] std::string dump_tree() const;
   [[nodiscard]] std::size_t mount_count() const { return mount_count_; }
   [[nodiscard]] std::size_t unmount_count() const { return unmount_count_; }
