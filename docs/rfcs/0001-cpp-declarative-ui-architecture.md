@@ -2,7 +2,7 @@
 
 - Status: Accepted for prototype
 - Target: DUI 0.1
-- Last updated: 2026-09-10
+- Last updated: 2026-09-13
 
 ## Summary
 
@@ -40,7 +40,7 @@ The project will provide:
 - selective type erasure for runtime and ABI boundaries.
 
 The initial prototype excludes production graphics, mobile embedding, hot code
-reload, accessibility platform bridges, and binary-stable plugins.
+reload, and binary-stable plugins.
 
 ## Flutter Engine relationship
 
@@ -305,6 +305,26 @@ provider and drops pending actions and host callback captures. Acceptance
 requires warning-free Win32 compilation, transactional malformed-update tests,
 message filtering tests, and target-OS verification of provider navigation,
 properties, Invoke routing, bounds, and UIA event observation.
+
+The semantic-focus slice adds `focusable` and `focused` state independently of
+generic enabled state, plus a `focus` semantics action. A node exposes that
+action only while it is focusable, enabled, and backed by a live RenderObject
+focus handler; explicit properties alone cannot manufacture an actionable focus
+target. `FocusView` reports whether its Element-owned `FocusNode` is the current
+owner, and focus changes are observable in a new semantics snapshot without
+dirtying layout or paint. Action dispatch revalidates the current tree before
+requesting focus, preserving the same stale, hidden, clipped, lazy-cache, and
+dormant exclusions as activation. The Win32 adapter maps the state to
+`IsKeyboardFocusable` and `HasKeyboardFocus`, resolves fragment-root `GetFocus`,
+and marshals provider `SetFocus` through its private HWND action message before
+requesting native window and framework focus. `HasKeyboardFocus` and `GetFocus`
+also require actual keyboard focus within the active HWND. Focus events are
+deferred until synchronous `WM_SETFOCUS` handling and framework publication
+settle, use an adapter-lifetime cookie to reject stale posted messages, and call
+UIA outside the model lock. Acceptance covers focus action authorization, focus
+transfer and clearing, differ updates that retain stable IDs, callback-driven
+tree mutation, and warning-clean Win32 compilation. Native UIA focus-event
+interoperability remains target-OS acceptance work.
 
 A platform text-input adapter connects a real host window to an operating
 system text service; a synthetic or terminal-only backend does not satisfy this

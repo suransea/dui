@@ -81,8 +81,9 @@ Implemented foundation:
   clients, and DPR-scaled candidate/composition positioning;
 - a conditional Win32 UI Automation adapter with a synthetic fragment root,
   live stable-ID providers, transactional incremental updates, role/property and
-  tree navigation exposure, DPR-scaled screen bounds, point lookup,
-  `WM_GETOBJECT` integration, and asynchronous Invoke action routing.
+  tree navigation exposure, keyboard-focus state, DPR-scaled screen bounds,
+  point lookup, `WM_GETOBJECT` integration, and asynchronous Invoke/focus action
+  routing.
 
 The input and lifecycle test executables cover the M2 foundation acceptance
 criteria in RFC 0001. Rendering tests additionally cover declarative gesture
@@ -96,8 +97,9 @@ Windows HWND, IME, UIA client, or screen reader in this environment.
 ## M3: Production Rendering
 
 Status: protocol-separation, retained-rendering, raster-submission, surface,
-and initial Sliver/Viewport slices implemented and verified; production GPU
-consumption and lazy scrolling remain in progress.
+Sliver/Viewport, lazy scrolling, semantics, and initial Win32 accessibility
+slices implemented and verified; production GPU consumption and native runtime
+validation remain in progress.
 
 The first M3 slice moves `BoxConstraints`, `Size`, `BoxParentData`, child box
 layout, and rectangular hit testing out of protocol-neutral `RenderObject` and
@@ -298,6 +300,21 @@ entry points contain exceptions. The conditional test covers transactional
 malformed delivery and message filtering; the executable cross-compiles and
 links warning-free, while real UIA client and screen-reader verification remains
 pending.
+
+The semantic-focus slice adds platform-neutral `focusable` and `focused` state
+plus `SemanticsAction::focus`. `FocusView` resolves that state from its live
+Element-owned FocusNode, and only a focusable, enabled RenderObject with a real
+focus handler exposes the action. Focus requests revalidate the current visible
+semantics tree, while state changes remain layout- and paint-neutral and flow
+through `SemanticsDiffer` as stable-ID updates. Win32 maps the state to
+`IsKeyboardFocusable`, `HasKeyboardFocus`, fragment-root `GetFocus`, and an
+asynchronous `SetFocus` request dispatched on the HWND thread. Reported focus is
+gated by the HWND thread's actual keyboard focus, and cookie-scoped deferred
+notifications avoid stale adapter messages and publish focus-change events only
+after native and framework focus settle. Tests cover eligibility, autofocus,
+transfer, clearing, stale/disabled action rejection, focus diff records, and
+malformed multiple-focus transactionality. Native UIA focus-event and assistive-
+technology observation remain target-OS work.
 
 ## Verification
 

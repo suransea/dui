@@ -85,6 +85,7 @@ public:
   [[nodiscard]] Id id() const { return id_; }
   [[nodiscard]] std::optional<Id> parent_id() const { return parent_; }
   [[nodiscard]] bool can_focus() const { return can_focus_; }
+  [[nodiscard]] bool is_focused() const;
 
   void request_focus();
   void set_can_focus(bool value);

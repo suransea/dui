@@ -911,6 +911,11 @@ bool RenderObject::handle_semantics_action(SemanticsAction action) {
     }
     static_cast<void>(handle_activate());
     return true;
+  case SemanticsAction::focus:
+    if (!has_focus_handler()) {
+      return false;
+    }
+    return handle_focus();
   }
   return false;
 }
@@ -1111,6 +1116,15 @@ bool RenderActionBox::handle_activate() {
     callback();
   }
   return stops_propagation;
+}
+
+bool RenderActionBox::handle_focus() {
+  if (!has_focus_handler()) {
+    return false;
+  }
+  auto callback = on_activate_;
+  callback();
+  return true;
 }
 
 void RenderSemanticsBox::perform_layout() {
@@ -1376,6 +1390,7 @@ SemanticsUpdate SemanticsDiffer::update(const SemanticsTree& tree) {
     std::size_t child_index;
   };
   std::vector<PendingNode> pending;
+  bool has_focused_node = false;
   for (std::size_t index = tree.roots.size(); index > 0; --index) {
     pending.push_back({&tree.roots[index - 1], std::nullopt, index - 1});
   }
@@ -1386,8 +1401,16 @@ SemanticsUpdate SemanticsDiffer::update(const SemanticsTree& tree) {
     if (node.id == 0 || !ids.insert(node.id).second) {
       throw std::logic_error("SemanticsTree node IDs must be nonzero and unique");
     }
+    if (node.focused && (!node.focusable || !node.enabled || has_focused_node)) {
+      throw std::logic_error("SemanticsTree contains invalid focus state");
+    }
+    if (node.focusable != node.supports(SemanticsAction::focus)) {
+      throw std::logic_error("SemanticsTree contains inconsistent focus actions");
+    }
+    has_focused_node = has_focused_node || node.focused;
     next.push_back({node.id, current.parent_id, current.child_index, node.role, node.label,
-                    node.value, node.enabled, node.bounds, node.actions});
+                    node.value, node.enabled, node.bounds, node.actions, node.focusable,
+                    node.focused});
     for (std::size_t index = node.children.size(); index > 0; --index) {
       pending.push_back({&node.children[index - 1], node.id, index - 1});
     }
@@ -1544,6 +1567,8 @@ SemanticsTree RenderOwner::semantics_tree() const {
       bounds = *clipped_bounds;
     }
 
+    const bool focusable =
+      properties->enabled && properties->focusable && object.has_focus_handler();
     SemanticsNode node{object.id_,
                        properties->role,
                        properties->label,
@@ -1551,9 +1576,14 @@ SemanticsTree RenderOwner::semantics_tree() const {
                        properties->enabled,
                        bounds,
                        {},
-                       std::move(descendants)};
+                       std::move(descendants),
+                       focusable,
+                       focusable && properties->focused};
     if (properties->enabled && object.has_activation_handler()) {
       node.actions.push_back(SemanticsAction::activate);
+    }
+    if (focusable) {
+      node.actions.push_back(SemanticsAction::focus);
     }
     std::vector<SemanticsNode> result;
     result.push_back(std::move(node));
@@ -1579,6 +1609,7 @@ bool RenderOwner::perform_semantics_action(std::uint64_t id, SemanticsAction act
   }
   switch (action) {
   case SemanticsAction::activate:
+  case SemanticsAction::focus:
     return object->handle_semantics_action(action);
   }
   return false;

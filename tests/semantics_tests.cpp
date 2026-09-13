@@ -19,7 +19,7 @@ void require(bool condition, const std::string& message) {
 
 dui::SemanticsProperties properties(std::string label, dui::SemanticsRole role, bool enabled = true,
                                     bool hidden = false) {
-  return {role, std::move(label), {}, enabled, hidden};
+  return {role, std::move(label), {}, enabled, hidden, false, false};
 }
 
 dui::SemanticsNode node(std::uint64_t id, std::string label,
@@ -199,9 +199,11 @@ void primitive_views_produce_semantics_and_actions() {
             gesture.children.size() == 1 && gesture.children.front().label == "tap" &&
             gesture.supports(dui::SemanticsAction::activate),
           "GestureDetector did not produce an actionable semantic container");
-  require(focus.role == dui::SemanticsRole::button && !focus.enabled &&
-            focus.children.size() == 1 && focus.children.front().label == "focus" &&
-            !focus.supports(dui::SemanticsAction::activate),
+  require(focus.role == dui::SemanticsRole::button && !focus.enabled && !focus.focusable &&
+            !focus.focused && focus.children.size() == 1 &&
+            focus.children.front().label == "focus" &&
+            !focus.supports(dui::SemanticsAction::activate) &&
+            !focus.supports(dui::SemanticsAction::focus),
           "disabled FocusView exposed an enabled semantic action");
   owner.dispatch_pointer({30, dui::BuildOwner::PointerPhase::down, {1.0, 53.0}});
   owner.dispatch_pointer({30, dui::BuildOwner::PointerPhase::up, {1.0, 53.0}});
@@ -242,10 +244,47 @@ void primitive_views_produce_semantics_and_actions() {
   const auto* enabled_focus = action_update.find(focus_id);
   require(disabled_gesture != nullptr && !disabled_gesture->enabled &&
             !disabled_gesture->supports(dui::SemanticsAction::activate) &&
-            enabled_focus != nullptr && enabled_focus->enabled &&
-            enabled_focus->supports(dui::SemanticsAction::activate) &&
-            owner.perform_semantics_action(focus_id, dui::SemanticsAction::activate),
+            enabled_focus != nullptr && enabled_focus->enabled && enabled_focus->focusable &&
+            !enabled_focus->focused && enabled_focus->supports(dui::SemanticsAction::activate) &&
+            enabled_focus->supports(dui::SemanticsAction::focus) &&
+            owner.perform_semantics_action(focus_id, dui::SemanticsAction::focus),
           "primitive callback or focus eligibility update retained stale actions");
+  const auto focused_tree = owner.semantics_tree();
+  const auto* focused = focused_tree.find(focus_id);
+  require(focused != nullptr && focused->focusable && focused->focused &&
+            owner.focused_node() != nullptr,
+          "semantic focus action did not update neutral focus state");
+
+  owner.render(make_view("updated portrait", false, false));
+  const auto cleared_focus_tree = owner.semantics_tree();
+  const auto* cleared_focus = cleared_focus_tree.find(focus_id);
+  require(cleared_focus != nullptr && !cleared_focus->focusable && !cleared_focus->focused &&
+            owner.focused_node() == nullptr &&
+            !owner.perform_semantics_action(focus_id, dui::SemanticsAction::focus),
+          "disabled FocusView retained semantic or framework focus");
+}
+
+void semantic_focus_transfers_between_stable_nodes() {
+  dui::BuildOwner owner;
+  owner.render(dui::VStack{
+    dui::FocusView<dui::Text>{dui::Text{"first"}, {}, true, true},
+    dui::FocusView<dui::Text>{dui::Text{"second"}, {}, true, false},
+  });
+  [[maybe_unused]] const auto frame = owner.frame(dui::BoxConstraints::tight({100.0, 32.0}));
+  const auto initial = owner.semantics_tree();
+  require(initial.roots.size() == 2 && initial.roots[0].focused && initial.roots[0].focusable &&
+            !initial.roots[1].focused && initial.roots[1].focusable,
+          "autofocus was not represented by exactly one semantic node");
+  const auto first_id = initial.roots[0].id;
+  const auto second_id = initial.roots[1].id;
+
+  require(owner.perform_semantics_action(second_id, dui::SemanticsAction::focus),
+          "second semantic focus action was not dispatched");
+  const auto transferred = owner.semantics_tree();
+  require(transferred.roots.size() == 2 && transferred.roots[0].id == first_id &&
+            !transferred.roots[0].focused && transferred.roots[1].id == second_id &&
+            transferred.roots[1].focused,
+          "semantic focus transfer changed identity or retained multiple focused nodes");
 }
 
 void semantics_tree_clips_lazy_visible_children() {
@@ -360,6 +399,9 @@ void semantics_differ_emits_deterministic_transactional_updates() {
   auto new_parent = node(4, "new parent", {moved_child, added_child});
   auto updated_root = node(1, "updated root");
   updated_root.actions.push_back(dui::SemanticsAction::activate);
+  updated_root.actions.push_back(dui::SemanticsAction::focus);
+  updated_root.focusable = true;
+  updated_root.focused = true;
   const dui::SemanticsTree second{{new_parent, updated_root}};
   const auto delta = differ.update(second);
   const std::array expected_ids{std::uint64_t{4}, std::uint64_t{5}, std::uint64_t{2},
@@ -382,8 +424,10 @@ void semantics_differ_emits_deterministic_transactional_updates() {
             delta.changes[2].entry.supports(dui::SemanticsAction::activate) &&
             delta.changes[3].entry.child_index == 1 &&
             delta.changes[3].entry.supports(dui::SemanticsAction::activate) &&
+            delta.changes[3].entry.supports(dui::SemanticsAction::focus) &&
+            delta.changes[3].entry.focusable && delta.changes[3].entry.focused &&
             delta.changes[4].entry.label == "removed",
-          "semantic move, reorder, action update, or removal metadata was incorrect");
+          "semantic move, focus, reorder, action update, or removal metadata was incorrect");
 
   const dui::SemanticsTree duplicate{{node(6, "first"), node(6, "duplicate")}};
   bool duplicate_rejected = false;
@@ -399,7 +443,30 @@ void semantics_differ_emits_deterministic_transactional_updates() {
   } catch (const std::logic_error&) {
     zero_rejected = true;
   }
-  require(duplicate_rejected && zero_rejected && differ.entries().size() == 4 &&
+  auto invalid_focus = node(7, "invalid focus");
+  invalid_focus.focused = true;
+  bool invalid_focus_rejected = false;
+  try {
+    static_cast<void>(differ.update({{invalid_focus}}));
+  } catch (const std::logic_error&) {
+    invalid_focus_rejected = true;
+  }
+  auto first_focus = node(8, "first focus");
+  first_focus.focusable = true;
+  first_focus.focused = true;
+  first_focus.actions.push_back(dui::SemanticsAction::focus);
+  auto second_focus = node(9, "second focus");
+  second_focus.focusable = true;
+  second_focus.focused = true;
+  second_focus.actions.push_back(dui::SemanticsAction::focus);
+  bool duplicate_focus_rejected = false;
+  try {
+    static_cast<void>(differ.update({{first_focus, second_focus}}));
+  } catch (const std::logic_error&) {
+    duplicate_focus_rejected = true;
+  }
+  require(duplicate_rejected && zero_rejected && invalid_focus_rejected &&
+            duplicate_focus_rejected && differ.entries().size() == 4 &&
             differ.entries()[0].id == 4 && differ.entries()[3].id == 1,
           "malformed semantics update replaced the retained snapshot");
 
@@ -577,6 +644,7 @@ int main() {
   try {
     semantics_tree_preserves_hierarchy_identity_and_actions();
     primitive_views_produce_semantics_and_actions();
+    semantic_focus_transfers_between_stable_nodes();
     semantics_tree_clips_lazy_visible_children();
     render_owner_rejects_semantics_without_current_layout();
     semantics_differ_emits_deterministic_transactional_updates();

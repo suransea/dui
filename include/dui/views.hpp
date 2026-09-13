@@ -1065,6 +1065,7 @@ void update_view(Element& element, const GestureDetector<Child>& view, BuildOwne
   action.set_on_activate(view.on_tap);
   action.set_stops_propagation(false);
   action.set_semantics_enabled(true);
+  action.set_semantics_focus(false, {});
   auto& children = ElementAccess::children(element);
   if (children.empty()) {
     children.push_back(nullptr);
@@ -1093,6 +1094,10 @@ void update_view(Element& element, const FocusView<Child>& view, BuildOwner& own
   action.set_on_activate(std::move(focus_action));
   action.set_stops_propagation(true);
   action.set_semantics_enabled(view.can_focus);
+  action.set_semantics_focus(view.can_focus, [weak_focus] {
+    const auto node = weak_focus.lock();
+    return node != nullptr && node->is_focused();
+  });
   if (is_new_focus_node && view.autofocus && view.can_focus) {
     focus_node->request_focus();
   }

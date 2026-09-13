@@ -71,8 +71,9 @@ trees with stable IDs, roles, labels, values, actions, and globally clipped
 bounds. Collection follows visible paint ranges, excluding hidden, clipped,
 lazy-cache, and dormant keep-alive content. A conditional Win32 UI Automation
 adapter exposes the tree through `WM_GETOBJECT`, including stable providers,
-navigation, properties, bounds, and asynchronous Invoke action routing. Native
-Windows runtime verification and adapters for other platforms remain in progress.
+navigation, properties, keyboard-focus state, bounds, and asynchronous Invoke
+and focus action routing. Native Windows runtime verification and adapters for
+other platforms remain in progress.
 Visible `Text`, labeled `Image`, `GestureDetector`, and `FocusView` primitives
 also contribute semantics without requiring an explicit wrapper; image asset
 identifiers are never used as accessibility labels.

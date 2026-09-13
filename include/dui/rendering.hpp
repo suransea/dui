@@ -182,7 +182,7 @@ class RenderSliver;
 
 enum class SemanticsRole { generic, text, image, button };
 
-enum class SemanticsAction { activate };
+enum class SemanticsAction { activate, focus };
 
 struct SemanticsProperties {
   SemanticsRole role{SemanticsRole::generic};
@@ -190,6 +190,8 @@ struct SemanticsProperties {
   std::string value;
   bool enabled{true};
   bool hidden{};
+  bool focusable{};
+  bool focused{};
 
   friend bool operator==(const SemanticsProperties&, const SemanticsProperties&) = default;
 };
@@ -203,6 +205,8 @@ struct SemanticsNode {
   Rect bounds{};
   std::vector<SemanticsAction> actions;
   std::vector<SemanticsNode> children;
+  bool focusable{};
+  bool focused{};
 
   [[nodiscard]] bool supports(SemanticsAction action) const {
     return std::find(actions.begin(), actions.end(), action) != actions.end();
@@ -225,6 +229,8 @@ struct SemanticsEntry {
   bool enabled{true};
   Rect bounds{};
   std::vector<SemanticsAction> actions;
+  bool focusable{};
+  bool focused{};
 
   [[nodiscard]] bool supports(SemanticsAction action) const {
     return std::find(actions.begin(), actions.end(), action) != actions.end();
@@ -353,6 +359,8 @@ protected:
   [[nodiscard]] virtual bool has_activation_handler() const { return false; }
   [[nodiscard]] virtual bool handle_activate() { return false; }
   [[nodiscard]] virtual bool handle_semantics_action(SemanticsAction action);
+  [[nodiscard]] virtual bool has_focus_handler() const { return false; }
+  [[nodiscard]] virtual bool handle_focus() { return false; }
   [[nodiscard]] virtual bool has_repaint_boundary() const { return false; }
   [[nodiscard]] virtual std::optional<SemanticsProperties> semantics_properties() const {
     return std::nullopt;
@@ -570,7 +578,7 @@ protected:
     if (text_.empty()) {
       return std::nullopt;
     }
-    return SemanticsProperties{SemanticsRole::text, text_, {}, true, false};
+    return SemanticsProperties{SemanticsRole::text, text_, {}, true, false, false, false};
   }
 
 private:
@@ -601,7 +609,8 @@ protected:
     if (semantics_label_.empty()) {
       return std::nullopt;
     }
-    return SemanticsProperties{SemanticsRole::image, semantics_label_, {}, true, false};
+    return SemanticsProperties{
+      SemanticsRole::image, semantics_label_, {}, true, false, false, false};
   }
 
 private:
@@ -663,6 +672,10 @@ public:
   void set_on_activate(std::function<void()> callback) { on_activate_ = std::move(callback); }
   void set_stops_propagation(bool value) { stops_propagation_ = value; }
   void set_semantics_enabled(bool value) { semantics_enabled_ = value; }
+  void set_semantics_focus(bool focusable, std::function<bool()> focused) {
+    semantics_focusable_ = focusable;
+    semantics_focused_ = std::move(focused);
+  }
 
 protected:
   void perform_layout() override;
@@ -671,15 +684,26 @@ protected:
     return static_cast<bool>(on_activate_);
   }
   [[nodiscard]] bool handle_activate() override;
+  [[nodiscard]] bool has_focus_handler() const override {
+    return semantics_focusable_ && static_cast<bool>(on_activate_);
+  }
+  [[nodiscard]] bool handle_focus() override;
   [[nodiscard]] std::optional<SemanticsProperties> semantics_properties() const override {
-    return SemanticsProperties{
-      SemanticsRole::button, {}, {}, semantics_enabled_ && static_cast<bool>(on_activate_)};
+    return SemanticsProperties{SemanticsRole::button,
+                               {},
+                               {},
+                               semantics_enabled_ && static_cast<bool>(on_activate_),
+                               false,
+                               semantics_focusable_,
+                               semantics_focused_ && semantics_focused_()};
   }
 
 private:
   std::function<void()> on_activate_;
   bool stops_propagation_{};
   bool semantics_enabled_{true};
+  bool semantics_focusable_{};
+  std::function<bool()> semantics_focused_;
 };
 
 class RenderSemanticsBox final : public RenderBox {

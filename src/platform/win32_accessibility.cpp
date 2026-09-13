@@ -15,6 +15,7 @@
 #include <cmath>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -27,6 +28,7 @@ namespace {
 constexpr HRESULT element_not_available = static_cast<HRESULT>(UIA_E_ELEMENTNOTAVAILABLE);
 constexpr HRESULT element_not_enabled = static_cast<HRESULT>(UIA_E_ELEMENTNOTENABLED);
 constexpr HRESULT not_supported = static_cast<HRESULT>(UIA_E_NOTSUPPORTED);
+std::atomic<std::uintptr_t> next_adapter_cookie{1};
 
 template <typename Function> HRESULT translate_com_call(Function&& function) noexcept {
   try {
@@ -43,6 +45,11 @@ struct NativeNode {
   std::vector<std::uint64_t> children;
 };
 
+struct PendingAction {
+  std::uint64_t id{};
+  SemanticsAction action{};
+};
+
 struct ProviderModel {
   std::recursive_mutex mutex;
   HWND window{};
@@ -50,11 +57,26 @@ struct ProviderModel {
   AccessibilityAdapter::ActionHandler action_handler;
   std::unordered_map<std::uint64_t, NativeNode> nodes;
   std::vector<std::uint64_t> roots;
-  std::unordered_map<std::uintptr_t, std::uint64_t> pending_actions;
+  std::unordered_map<std::uintptr_t, PendingAction> pending_actions;
   std::uintptr_t next_action{1};
   UINT action_message{};
+  std::uintptr_t action_cookie{};
+  std::optional<std::uint64_t> announced_focus;
   bool alive{true};
 };
+
+[[nodiscard]] bool window_has_keyboard_focus(HWND window) {
+  const DWORD thread = GetWindowThreadProcessId(window, nullptr);
+  GUITHREADINFO information{};
+  information.cbSize = sizeof(GUITHREADINFO);
+  if (thread == 0 || GetGUIThreadInfo(thread, &information) == FALSE ||
+      information.hwndFocus == nullptr) {
+    return false;
+  }
+  const HWND foreground = GetForegroundWindow();
+  return (information.hwndFocus == window || IsChild(window, information.hwndFocus) != FALSE) &&
+         foreground != nullptr && GetAncestor(window, GA_ROOT) == foreground;
+}
 
 [[nodiscard]] bool valid_rect(Rect rect) {
   return std::isfinite(rect.origin.x) && std::isfinite(rect.origin.y) &&
@@ -221,6 +243,16 @@ public:
         result->vt = VT_BOOL;
         result->boolVal = entry->enabled ? VARIANT_TRUE : VARIANT_FALSE;
         break;
+      case UIA_IsKeyboardFocusablePropertyId:
+        result->vt = VT_BOOL;
+        result->boolVal = entry->focusable ? VARIANT_TRUE : VARIANT_FALSE;
+        break;
+      case UIA_HasKeyboardFocusPropertyId:
+        result->vt = VT_BOOL;
+        result->boolVal = entry->focused && window_has_keyboard_focus(model_->window)
+                            ? VARIANT_TRUE
+                            : VARIANT_FALSE;
+        break;
       case UIA_ValueValuePropertyId:
         result->vt = VT_BSTR;
         result->bstrVal = SysAllocString(utf8_to_wide(entry->value).c_str());
@@ -379,16 +411,26 @@ public:
   }
 
   HRESULT STDMETHODCALLTYPE SetFocus() noexcept override {
-    return translate_com_call([&] {
+    return translate_com_call([&]() -> HRESULT {
       const std::scoped_lock lock{model_->mutex};
       if (!available()) {
         return element_not_available;
       }
-      if (id_ != 0) {
+      if (id_ == 0) {
+        static_cast<void>(::SetFocus(model_->window));
+        return ::GetFocus() == model_->window ? S_OK : E_FAIL;
+      }
+      const SemanticsEntry& entry = model_->nodes.at(id_).entry;
+      if (!entry.enabled) {
+        return element_not_enabled;
+      }
+      if (!entry.focusable || !entry.supports(SemanticsAction::focus)) {
         return not_supported;
       }
-      static_cast<void>(::SetFocus(model_->window));
-      return ::GetFocus() == model_->window ? S_OK : E_FAIL;
+      if (!model_->action_handler) {
+        return not_supported;
+      }
+      return enqueue_action(SemanticsAction::focus);
     });
   }
 
@@ -459,9 +501,21 @@ public:
       return E_POINTER;
     }
     *result = nullptr;
-    return translate_com_call([&] {
+    return translate_com_call([&]() -> HRESULT {
       const std::scoped_lock lock{model_->mutex};
-      return available() ? S_OK : element_not_available;
+      if (!available()) {
+        return element_not_available;
+      }
+      if (!window_has_keyboard_focus(model_->window)) {
+        return S_OK;
+      }
+      for (const auto& [id, node] : model_->nodes) {
+        if (node.entry.focused) {
+          *result = static_cast<IRawElementProviderFragment*>(new NodeProvider{model_, id});
+          break;
+        }
+      }
+      return S_OK;
     });
   }
 
@@ -484,17 +538,7 @@ public:
       if (!model_->action_handler) {
         return not_supported;
       }
-      std::uintptr_t token{};
-      do {
-        token = model_->next_action++;
-      } while (token == 0 || model_->pending_actions.contains(token));
-      model_->pending_actions.emplace(token, id_);
-      if (PostMessageW(model_->window, model_->action_message, static_cast<WPARAM>(token), 0) ==
-          FALSE) {
-        model_->pending_actions.erase(token);
-        return HRESULT_FROM_WIN32(GetLastError());
-      }
-      return S_OK;
+      return enqueue_action(SemanticsAction::activate);
     } catch (...) {
       return E_FAIL;
     }
@@ -567,6 +611,20 @@ private:
     return entry != nullptr && !entry->value.empty();
   }
 
+  [[nodiscard]] HRESULT enqueue_action(SemanticsAction action) {
+    std::uintptr_t token{};
+    do {
+      token = model_->next_action++;
+    } while (token == 0 || model_->pending_actions.contains(token));
+    model_->pending_actions.emplace(token, PendingAction{id_, action});
+    if (PostMessageW(model_->window, model_->action_message, static_cast<WPARAM>(token),
+                     static_cast<LPARAM>(model_->action_cookie)) == FALSE) {
+      model_->pending_actions.erase(token);
+      return HRESULT_FROM_WIN32(GetLastError());
+    }
+    return S_OK;
+  }
+
   [[nodiscard]] std::optional<std::uint64_t> hit_test(std::uint64_t id, Offset point) const {
     const NativeNode& node = model_->nodes.at(id);
     for (auto child = node.children.rbegin(); child != node.children.rend(); ++child) {
@@ -591,6 +649,7 @@ private:
 
 void rebuild_hierarchy(ProviderModel& model) {
   model.roots.clear();
+  bool has_focused_node = false;
   for (auto& [id, node] : model.nodes) {
     static_cast<void>(id);
     node.children.clear();
@@ -599,6 +658,13 @@ void rebuild_hierarchy(ProviderModel& model) {
     if (!valid_rect(node.entry.bounds)) {
       throw std::invalid_argument("Win32 accessibility received invalid bounds");
     }
+    if (node.entry.focused && (!node.entry.focusable || !node.entry.enabled || has_focused_node)) {
+      throw std::invalid_argument("Win32 accessibility received invalid focus state");
+    }
+    if (node.entry.focusable != node.entry.supports(SemanticsAction::focus)) {
+      throw std::invalid_argument("Win32 accessibility received inconsistent focus actions");
+    }
+    has_focused_node = has_focused_node || node.entry.focused;
     if (node.entry.parent_id.has_value()) {
       const auto parent = model.nodes.find(*node.entry.parent_id);
       if (parent == model.nodes.end() || *node.entry.parent_id == id) {
@@ -651,10 +717,13 @@ public:
     model_->window = static_cast<HWND>(native_window);
     model_->device_pixel_ratio = scale;
     model_->action_handler = std::move(handler);
-    model_->action_message = RegisterWindowMessageW(L"dui.win32.accessibility.invoke");
+    model_->action_message = RegisterWindowMessageW(L"dui.win32.accessibility.action");
     if (model_->action_message == 0) {
       throw std::runtime_error("Failed to register the Win32 accessibility action message");
     }
+    do {
+      model_->action_cookie = next_adapter_cookie.fetch_add(1);
+    } while (model_->action_cookie == 0);
     root_ = new NodeProvider{model_, 0};
   }
 
@@ -670,8 +739,16 @@ public:
   }
 
   void apply(std::span<const SemanticsChange> changes) {
+    std::optional<std::uint64_t> previous_focus;
+    std::optional<std::uint64_t> next_focus;
     {
       const std::scoped_lock lock{model_->mutex};
+      for (const auto& [id, node] : model_->nodes) {
+        if (node.entry.focused) {
+          previous_focus = id;
+          break;
+        }
+      }
       ProviderModel next;
       next.nodes = model_->nodes;
       for (const SemanticsChange& change : changes) {
@@ -698,6 +775,12 @@ public:
         }
       }
       rebuild_hierarchy(next);
+      for (const auto& [id, node] : next.nodes) {
+        if (node.entry.focused) {
+          next_focus = id;
+          break;
+        }
+      }
       validate_scaled_bounds(next, model_->device_pixel_ratio);
       model_->nodes.swap(next.nodes);
       model_->roots.swap(next.roots);
@@ -707,36 +790,103 @@ public:
         UiaRaiseStructureChangedEvent(static_cast<IRawElementProviderSimple*>(root_),
                                       StructureChangeType_ChildrenInvalidated, nullptr, 0));
     }
+    if (next_focus != previous_focus && window_has_keyboard_focus(model_->window)) {
+      {
+        const std::scoped_lock lock{model_->mutex};
+        model_->announced_focus = next_focus;
+      }
+      NodeProvider* provider = root_;
+      if (next_focus.has_value()) {
+        provider = new (std::nothrow) NodeProvider{model_, *next_focus};
+      } else {
+        provider->AddRef();
+      }
+      if (provider != nullptr) {
+        static_cast<void>(UiaRaiseAutomationEvent(static_cast<IRawElementProviderSimple*>(provider),
+                                                  UIA_AutomationFocusChangedEventId));
+        provider->Release();
+      }
+    }
   }
 
   [[nodiscard]] std::optional<std::intptr_t> handle(std::uint32_t message, std::uintptr_t wparam,
                                                     std::intptr_t lparam) noexcept {
     const std::shared_ptr<ProviderModel> model = model_;
     if (message == model->action_message) {
+      if (lparam != static_cast<std::intptr_t>(model->action_cookie)) {
+        return std::nullopt;
+      }
+      if (wparam == 0) {
+        try {
+          std::optional<std::uint64_t> focused_id;
+          {
+            const std::scoped_lock lock{model->mutex};
+            if (!model->alive || !window_has_keyboard_focus(model->window)) {
+              return 0;
+            }
+            for (const auto& [id, node] : model->nodes) {
+              if (node.entry.focused && model->announced_focus != id) {
+                focused_id = id;
+                model->announced_focus = id;
+                break;
+              }
+            }
+          }
+          if (focused_id.has_value()) {
+            auto* provider = new NodeProvider{model, *focused_id};
+            static_cast<void>(
+              UiaRaiseAutomationEvent(static_cast<IRawElementProviderSimple*>(provider),
+                                      UIA_AutomationFocusChangedEventId));
+            provider->Release();
+          }
+        } catch (...) {
+          return 0;
+        }
+        return 0;
+      }
       try {
         ActionHandler handler;
-        std::uint64_t id{};
+        PendingAction action;
         {
           const std::scoped_lock lock{model->mutex};
           const auto pending = model->pending_actions.find(wparam);
           if (!model->alive || pending == model->pending_actions.end()) {
             return 0;
           }
-          id = pending->second;
+          action = pending->second;
           model->pending_actions.erase(pending);
-          if (!model->nodes.contains(id) || !model->nodes.at(id).entry.enabled ||
-              !model->nodes.at(id).entry.supports(SemanticsAction::activate)) {
+          if (!model->nodes.contains(action.id) || !model->nodes.at(action.id).entry.enabled ||
+              !model->nodes.at(action.id).entry.supports(action.action) ||
+              (action.action == SemanticsAction::focus &&
+               !model->nodes.at(action.id).entry.focusable)) {
             return 0;
           }
           handler = model->action_handler;
         }
+        if (action.action == SemanticsAction::focus) {
+          static_cast<void>(::SetFocus(model->window));
+        }
         if (handler) {
-          static_cast<void>(handler(id, SemanticsAction::activate));
+          static_cast<void>(handler(action.id, action.action));
         }
       } catch (...) {
         return 0;
       }
       return 0;
+    }
+    if (message == WM_SETFOCUS) {
+      {
+        const std::scoped_lock lock{model->mutex};
+        model->announced_focus.reset();
+      }
+      static_cast<void>(PostMessageW(model->window, model->action_message, 0,
+                                     static_cast<LPARAM>(model->action_cookie)));
+      return std::nullopt;
+    }
+    if (message == WM_KILLFOCUS) {
+      const std::scoped_lock lock{model->mutex};
+      model->announced_focus.reset();
+      return std::nullopt;
     }
     if (message != WM_GETOBJECT || lparam != static_cast<std::intptr_t>(UiaRootObjectId)) {
       return std::nullopt;

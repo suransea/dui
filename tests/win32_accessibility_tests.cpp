@@ -59,7 +59,9 @@ void validates_incremental_model_transactionally() {
   child.role = dui::SemanticsRole::button;
   child.label = "activate";
   child.bounds = {{5, 5}, {20, 20}};
-  child.actions = {dui::SemanticsAction::activate};
+  child.actions = {dui::SemanticsAction::activate, dui::SemanticsAction::focus};
+  child.focusable = true;
+  child.focused = true;
   const std::array initial{dui::SemanticsChange{dui::SemanticsChangeKind::added, root},
                            dui::SemanticsChange{dui::SemanticsChangeKind::added, child}};
   adapter.apply(initial);
@@ -72,6 +74,15 @@ void validates_incremental_model_transactionally() {
   const std::array malformed{dui::SemanticsChange{dui::SemanticsChangeKind::updated, invalid}};
   require_invalid_argument([&] { adapter.apply(malformed); },
                            "missing parent did not reject the UIA update");
+
+  dui::SemanticsEntry duplicate_focus = root;
+  duplicate_focus.focusable = true;
+  duplicate_focus.focused = true;
+  duplicate_focus.actions.push_back(dui::SemanticsAction::focus);
+  const std::array malformed_focus{
+    dui::SemanticsChange{dui::SemanticsChangeKind::updated, duplicate_focus}};
+  require_invalid_argument([&] { adapter.apply(malformed_focus); },
+                           "multiple focused nodes did not reject the UIA update");
 
   const std::array removed{dui::SemanticsChange{dui::SemanticsChangeKind::removed, child},
                            dui::SemanticsChange{dui::SemanticsChangeKind::removed, root}};

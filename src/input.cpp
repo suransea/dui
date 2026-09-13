@@ -221,6 +221,8 @@ FocusNode::~FocusNode() {
 
 void FocusNode::request_focus() { manager().request_focus(*this); }
 
+bool FocusNode::is_focused() const { return manager().focused_node().get() == this; }
+
 void FocusNode::set_can_focus(bool value) {
   can_focus_ = value;
   if (!can_focus_) {
