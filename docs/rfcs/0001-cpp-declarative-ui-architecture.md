@@ -680,6 +680,43 @@ limits, nonzero drop counts, vector-order preservation, repeated byte identity,
 locale independence, recorder-produced overflow snapshots, and malformed enum
 or negative-duration rejection.
 
+The raster-timeline slice makes `TimelineRecorder` safe for concurrent UI and
+raster recording plus concurrent `snapshot()` and `clear()`. Identifier and ring
+state are mutex-protected; calls to the injected clock are separately serialized
+and occur without the recorder-state mutex. The clock remains `noexcept`, passive,
+and non-reentrant with respect to the same recorder. Ring retention linearizes at
+event completion. A concurrent clear removes events completed before clear takes
+the state lock; a span already in progress may finish into the cleared ring.
+Snapshots copy under lock and sort their detached copy by entry sequence after
+unlocking.
+
+`RasterThread` accepts an optional recorder fixed for its lifetime. A raster root
+span starts on the raster worker only after a validated submission is dequeued
+and renderer construction has succeeded, so it excludes queue latency. Its
+`frameId` equals the `FrameTicket` ID and is interpreted within the raster lane;
+this slice does not fabricate correlation to the UI frame that produced the
+`LayerTree`. Child spans cover validated surface acquisition including
+`take_frame()`, `SurfaceRenderer::render()`, and `SurfaceFrame::present()`.
+Their version-2 spellings are `raster`, `rasterFrame`, `surfaceAcquire`,
+`rasterize`, and `surfacePresent`. Every raster span has work count one and pass
+zero. Successful work is `completed`; transient acquisition or presentation is
+`unavailable` or `outOfDate`; observed surface loss is `lost`; and other
+exceptions are `failed`. Children share the ticket frame ID and name the raster
+root as parent. The root adopts the terminal child outcome. Existing ticket
+values and exceptions remain authoritative and unchanged.
+
+Submissions canceled before dequeue and submissions pending behind renderer
+factory or terminal worker failure emit no raster event because no raster work
+began. Invalid or rejected submissions likewise emit nothing. A null recorder
+performs no clock reads. Version 1 JSON bytes remain unchanged for empty and
+UI-only snapshots; snapshots containing any raster lane, raster phase, or new
+outcome emit version 2 with the otherwise unchanged schema and field order.
+Acceptance covers ready/presented, unavailable, out-of-date, acquire-loss,
+present-loss, and renderer-failure paths; exact phase omission after an early
+exit; ticket/frame and parent correlation; concurrent UI/raster collection,
+snapshot, and clear; disabled behavior; canonical version selection; and
+ThreadSanitizer execution without races or deadlock.
+
 ## Prototype acceptance criteria
 
 M0 is accepted when headless tests demonstrate:

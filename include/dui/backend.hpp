@@ -14,6 +14,8 @@ namespace dui {
 
 using NativeViewId = std::uint64_t;
 
+class TimelineRecorder;
+
 struct ViewMetrics {
   Size physical_size;
   double device_pixel_ratio{1.0};
@@ -183,6 +185,8 @@ public:
   // serialized. The worker exclusively owns SurfaceRenderer execution and
   // retains shared ownership of RasterSurface.
   RasterThread(std::shared_ptr<RasterSurface> surface, RendererFactory renderer_factory);
+  RasterThread(std::shared_ptr<RasterSurface> surface, RendererFactory renderer_factory,
+               std::shared_ptr<TimelineRecorder> timeline_recorder);
   ~RasterThread();
 
   RasterThread(const RasterThread&) = delete;

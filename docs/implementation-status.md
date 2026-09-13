@@ -318,8 +318,8 @@ technology observation remain target-OS work.
 
 ## M4: Tooling and Platforms
 
-Status: structured-inspector, UI timeline collection, and canonical timeline
-serialization slices implemented and verified.
+Status: structured-inspector, concurrent UI/raster timeline collection, and
+canonical timeline serialization slices implemented and verified.
 
 `BuildOwner::inspect()` now captures an owned, passive Element-tree snapshot.
 Each node records stable identity/generation, depth, name/value/key, active or
@@ -351,8 +351,8 @@ an exact drop count, and snapshots remain valid after recorder and owner
 destruction. Tests use fake clocks to cover exact timing and nesting, disabled
 clock reads, dirty and clean work counts, failure recovery, bounded overflow,
 clear without ID reuse, and all successful sixteen-pass and rejected
-seventeen-pass lazy stabilization phases. Raster-thread events, cross-thread
-observation, live transport, and timeline GUI tooling remain pending.
+seventeen-pass lazy stabilization phases. Live transport and timeline GUI
+tooling remain pending.
 
 `TimelineSnapshot::to_json()` now emits versioned canonical DUI JSON with fixed
 root and event field order, classic-locale base-10 integers, nanosecond timing,
@@ -364,6 +364,19 @@ enum names, signed time and integer limits, repeated byte identity, locale
 independence, vector-order preservation, and malformed values. A lossy
 Chrome/Perfetto trace adapter remains separate future work.
 
+The raster-timeline slice makes recorder IDs, ring state, snapshots, clear, and
+injected-clock access safe across UI, raster, and observer threads. An optional
+recorder fixed at `RasterThread` construction records one raster root per
+dequeued submission plus surface-acquire, rasterize, and present children.
+Raster events use their ticket ID as a lane-local frame ID and report completed,
+unavailable, out-of-date, lost, or failed outcomes without inventing a link to
+the originating UI frame. Work canceled before dequeue emits no raster event.
+Canonical JSON remains byte-compatible version 1 for UI-only snapshots and
+selects version 2 for the new raster vocabulary. Tests cover exact successful
+hierarchy and fake-clock timing, transient acquisition, acquire/present loss,
+present out-of-date, renderer failure, queued cancellation, disabled recording,
+and concurrent UI/raster recording with snapshot, clear, and serialization.
+
 ## Verification
 
 The prototype has been built and tested with:
@@ -372,7 +385,8 @@ The prototype has been built and tested with:
 - Clang 21.1;
 - Zig 0.14.1 bundled Clang in direct C++23 compatibility mode;
 - Clang AddressSanitizer;
-- Clang UndefinedBehaviorSanitizer.
+- Clang UndefinedBehaviorSanitizer;
+- GCC ThreadSanitizer.
 
 ## Known Prototype Constraints
 

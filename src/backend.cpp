@@ -1,4 +1,5 @@
 #include "dui/backend.hpp"
+#include "dui/runtime.hpp"
 
 #include <cmath>
 #include <condition_variable>
@@ -6,6 +7,7 @@
 #include <exception>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -168,6 +170,35 @@ SurfaceAcquisition RasterSurface::acquire(const SurfaceRequest& request) {
 
 class RasterThread::Impl {
 public:
+  class TimelineSpan {
+  public:
+    TimelineSpan(std::shared_ptr<TimelineRecorder> recorder, TimelinePhase phase,
+                 std::uint64_t parent_span_id, std::uint64_t frame_id)
+      : recorder_(std::move(recorder)) {
+      if (recorder_ != nullptr) {
+        event_ = recorder_->begin(TimelineLane::raster, phase, parent_span_id, frame_id, 0, 1);
+      }
+    }
+
+    ~TimelineSpan() { finish(TimelineOutcome::failed); }
+
+    TimelineSpan(const TimelineSpan&) = delete;
+    TimelineSpan& operator=(const TimelineSpan&) = delete;
+
+    [[nodiscard]] std::uint64_t id() const { return event_.has_value() ? event_->span_id : 0; }
+
+    void finish(TimelineOutcome outcome) noexcept {
+      if (event_.has_value()) {
+        recorder_->finish(*event_, outcome);
+        event_.reset();
+      }
+    }
+
+  private:
+    std::shared_ptr<TimelineRecorder> recorder_;
+    std::optional<TimelineEvent> event_;
+  };
+
   struct Submission {
     FrameId id{};
     LayerTree layer_tree;
@@ -182,19 +213,22 @@ public:
     std::deque<Submission> pending;
     std::shared_ptr<RasterSurface> surface;
     RendererFactory renderer_factory;
+    std::shared_ptr<TimelineRecorder> timeline_recorder;
     std::exception_ptr failure;
     FrameId next_frame{1};
     bool rendering{};
     bool stopping{};
   };
 
-  Impl(std::shared_ptr<RasterSurface> surface, RendererFactory renderer_factory)
+  Impl(std::shared_ptr<RasterSurface> surface, RendererFactory renderer_factory,
+       std::shared_ptr<TimelineRecorder> timeline_recorder)
     : state_(std::make_shared<State>()) {
     if (surface == nullptr || !renderer_factory) {
       throw std::invalid_argument("RasterThread requires a surface and renderer");
     }
     state_->surface = std::move(surface);
     state_->renderer_factory = std::move(renderer_factory);
+    state_->timeline_recorder = std::move(timeline_recorder);
     worker_ = std::thread{[state = state_] { run(std::move(state)); }};
   }
 
@@ -291,37 +325,62 @@ private:
         state->rendering = true;
       }
 
+      TimelineSpan raster_timeline{state->timeline_recorder, TimelinePhase::raster_frame, 0,
+                                   submission.id};
       FrameOutcome outcome = FrameOutcome::failed;
       try {
-        SurfaceAcquisition acquisition = state->surface->acquire(submission.request);
-        switch (acquisition.status()) {
-        case SurfaceAcquireStatus::ready: {
-          std::unique_ptr<SurfaceFrame> frame = acquisition.take_frame();
-          renderer->render(*frame, submission.layer_tree, submission.request);
+        std::unique_ptr<SurfaceFrame> frame;
+        {
+          TimelineSpan acquire_timeline{state->timeline_recorder, TimelinePhase::surface_acquire,
+                                        raster_timeline.id(), submission.id};
+          SurfaceAcquisition acquisition = state->surface->acquire(submission.request);
+          switch (acquisition.status()) {
+          case SurfaceAcquireStatus::ready:
+            frame = acquisition.take_frame();
+            acquire_timeline.finish(TimelineOutcome::completed);
+            break;
+          case SurfaceAcquireStatus::unavailable:
+            acquire_timeline.finish(TimelineOutcome::unavailable);
+            outcome = FrameOutcome::unavailable;
+            break;
+          case SurfaceAcquireStatus::out_of_date:
+            acquire_timeline.finish(TimelineOutcome::out_of_date);
+            outcome = FrameOutcome::out_of_date;
+            break;
+          case SurfaceAcquireStatus::lost:
+            acquire_timeline.finish(TimelineOutcome::lost);
+            raster_timeline.finish(TimelineOutcome::lost);
+            throw std::runtime_error("Raster surface was lost");
+          case SurfaceAcquireStatus::consumed:
+            throw std::logic_error("Raster surface returned consumed acquisition");
+          }
+        }
+        if (frame != nullptr) {
+          {
+            TimelineSpan render_timeline{state->timeline_recorder, TimelinePhase::rasterize,
+                                         raster_timeline.id(), submission.id};
+            renderer->render(*frame, submission.layer_tree, submission.request);
+            render_timeline.finish(TimelineOutcome::completed);
+          }
+          TimelineSpan present_timeline{state->timeline_recorder, TimelinePhase::surface_present,
+                                        raster_timeline.id(), submission.id};
           switch (frame->present()) {
           case SurfaceFrameDelegate::PresentStatus::presented:
+            present_timeline.finish(TimelineOutcome::completed);
             outcome = FrameOutcome::presented;
             break;
           case SurfaceFrameDelegate::PresentStatus::out_of_date:
+            present_timeline.finish(TimelineOutcome::out_of_date);
             outcome = FrameOutcome::out_of_date;
             break;
           case SurfaceFrameDelegate::PresentStatus::lost:
+            present_timeline.finish(TimelineOutcome::lost);
+            raster_timeline.finish(TimelineOutcome::lost);
             throw std::runtime_error("Raster surface was lost during present");
           }
-          break;
-        }
-        case SurfaceAcquireStatus::unavailable:
-          outcome = FrameOutcome::unavailable;
-          break;
-        case SurfaceAcquireStatus::out_of_date:
-          outcome = FrameOutcome::out_of_date;
-          break;
-        case SurfaceAcquireStatus::lost:
-          throw std::runtime_error("Raster surface was lost");
-        case SurfaceAcquireStatus::consumed:
-          throw std::logic_error("Raster surface returned consumed acquisition");
         }
       } catch (...) {
+        raster_timeline.finish(TimelineOutcome::failed);
         std::lock_guard lock{state->mutex};
         if (state->failure == nullptr) {
           state->failure = std::current_exception();
@@ -333,6 +392,22 @@ private:
         state->idle.notify_all();
         state->ready.notify_one();
         return;
+      }
+
+      switch (outcome) {
+      case FrameOutcome::presented:
+        raster_timeline.finish(TimelineOutcome::completed);
+        break;
+      case FrameOutcome::unavailable:
+        raster_timeline.finish(TimelineOutcome::unavailable);
+        break;
+      case FrameOutcome::out_of_date:
+        raster_timeline.finish(TimelineOutcome::out_of_date);
+        break;
+      case FrameOutcome::canceled:
+      case FrameOutcome::failed:
+        raster_timeline.finish(TimelineOutcome::failed);
+        break;
       }
 
       {
@@ -373,7 +448,12 @@ private:
 };
 
 RasterThread::RasterThread(std::shared_ptr<RasterSurface> surface, RendererFactory renderer_factory)
-  : impl_(std::make_unique<Impl>(std::move(surface), std::move(renderer_factory))) {}
+  : RasterThread(std::move(surface), std::move(renderer_factory), nullptr) {}
+
+RasterThread::RasterThread(std::shared_ptr<RasterSurface> surface, RendererFactory renderer_factory,
+                           std::shared_ptr<TimelineRecorder> timeline_recorder)
+  : impl_(std::make_unique<Impl>(std::move(surface), std::move(renderer_factory),
+                                 std::move(timeline_recorder))) {}
 
 RasterThread::~RasterThread() = default;
 

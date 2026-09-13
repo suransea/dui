@@ -60,13 +60,13 @@ ownership, and RenderObject protocol/dirty/counter metadata. Snapshots support
 stable-ID lookup and canonical JSON serialization while retaining no framework
 or native pointers.
 
-An optional fixed-capacity `TimelineRecorder` captures correlated UI-thread
-spans for reconciliation, dirty builds, frame production, render-tree sync,
-layout stabilization, lazy realization, and retained-layer composition.
-Callers can inject a monotonic clock for deterministic profiling and retain
-detached snapshots without exposing framework pointers. Timeline snapshots
-serialize to versioned, canonical, locale-independent JSON without reducing
-nanosecond timestamps to floating point.
+An optional fixed-capacity `TimelineRecorder` captures correlated UI and raster
+spans for reconciliation, frame production, layout stabilization, retained-layer
+composition, surface acquisition, rasterization, and presentation. Callers can
+inject a monotonic clock for deterministic profiling and safely snapshot or
+clear the recorder across those threads. Detached snapshots serialize to
+versioned, canonical, locale-independent JSON without reducing nanosecond
+timestamps to floating point.
 
 Implemented layout Views include `VStack`, `HStack`, `Stack`, `Padding`,
 `ColoredBox`, `Viewport`, and `SliverToBoxAdapter`; primitives include `Text`
@@ -106,7 +106,8 @@ cmake --build --preset debug
 ctest --preset debug
 ```
 
-Use the `asan` preset for AddressSanitizer and UndefinedBehaviorSanitizer.
+Use the `asan` preset for AddressSanitizer and UndefinedBehaviorSanitizer, or
+the `tsan` preset for ThreadSanitizer.
 
 The core requires C++23. C++26 static reflection will be an optional metadata
 and tooling enhancement, not a requirement for view composition.

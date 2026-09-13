@@ -936,6 +936,37 @@ void timeline_json_is_canonical_and_strict() {
             enumeration_json.find("\"sequence\":7") < enumeration_json.find("\"sequence\":1"),
           "timeline JSON omitted outcomes or sorted the public event vector");
 
+  const std::array raster_phases{dui::TimelinePhase::raster_frame,
+                                 dui::TimelinePhase::surface_acquire, dui::TimelinePhase::rasterize,
+                                 dui::TimelinePhase::surface_present};
+  const std::array raster_outcomes{dui::TimelineOutcome::completed,
+                                   dui::TimelineOutcome::unavailable,
+                                   dui::TimelineOutcome::out_of_date, dui::TimelineOutcome::lost};
+  const std::array<std::string_view, 4> raster_phase_names{"rasterFrame", "surfaceAcquire",
+                                                           "rasterize", "surfacePresent"};
+  const std::array<std::string_view, 4> raster_outcome_names{"completed", "unavailable",
+                                                             "outOfDate", "lost"};
+  dui::TimelineSnapshot raster_encoded;
+  for (std::size_t index = 0; index < raster_phases.size(); ++index) {
+    dui::TimelineEvent value;
+    value.sequence = index + 1;
+    value.span_id = index + 1;
+    value.lane = dui::TimelineLane::raster;
+    value.phase = raster_phases[index];
+    value.outcome = raster_outcomes[index];
+    raster_encoded.events.push_back(value);
+  }
+  const std::string raster_json = raster_encoded.to_json();
+  require(raster_json.starts_with("{\"version\":2") &&
+            raster_json.find("\"lane\":\"raster\"") != std::string::npos,
+          "raster timeline JSON did not select version 2 or encode its lane");
+  for (std::size_t index = 0; index < raster_phase_names.size(); ++index) {
+    require(
+      raster_json.contains("\"phase\":\"" + std::string{raster_phase_names[index]} + '"') &&
+        raster_json.contains("\"outcome\":\"" + std::string{raster_outcome_names[index]} + '"'),
+      "timeline JSON omitted a version-2 phase or outcome spelling");
+  }
+
   const auto rejects = [](dui::TimelineSnapshot malformed) {
     try {
       static_cast<void>(malformed.to_json());

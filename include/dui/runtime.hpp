@@ -27,6 +27,7 @@ class BuildContext;
 class BuildOwner;
 class Element;
 class DependencySource;
+class RasterThread;
 
 struct OwnerLifetime {
   BuildOwner* owner{};
@@ -247,7 +248,7 @@ struct InspectorSnapshot {
   friend bool operator==(const InspectorSnapshot&, const InspectorSnapshot&) = default;
 };
 
-enum class TimelineLane { ui };
+enum class TimelineLane { ui, raster };
 
 enum class TimelinePhase {
   reconcile,
@@ -257,9 +258,13 @@ enum class TimelinePhase {
   layout,
   lazy_realization,
   composite,
+  raster_frame,
+  surface_acquire,
+  rasterize,
+  surface_present,
 };
 
-enum class TimelineOutcome { completed, failed };
+enum class TimelineOutcome { completed, unavailable, out_of_date, lost, failed };
 
 struct TimelineEvent {
   std::uint64_t sequence{};
@@ -308,11 +313,12 @@ public:
 
 private:
   friend class BuildOwner;
+  friend class RasterThread;
   class Impl;
 
-  [[nodiscard]] TimelineEvent begin(TimelinePhase phase, std::uint64_t parent_span_id,
-                                    std::uint64_t frame_id, std::size_t pass,
-                                    std::size_t work_count) noexcept;
+  [[nodiscard]] TimelineEvent begin(TimelineLane lane, TimelinePhase phase,
+                                    std::uint64_t parent_span_id, std::uint64_t frame_id,
+                                    std::size_t pass, std::size_t work_count) noexcept;
   void finish(TimelineEvent event, TimelineOutcome outcome) noexcept;
   [[nodiscard]] std::uint64_t next_frame_id() noexcept;
 

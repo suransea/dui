@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <locale>
+#include <mutex>
 #include <ranges>
 #include <string_view>
 #include <utility>
@@ -32,28 +33,35 @@ public:
     }
   }
 
-  [[nodiscard]] TimelineEvent begin(TimelinePhase phase, std::uint64_t parent_span_id,
-                                    std::uint64_t frame_id, std::size_t pass,
-                                    std::size_t work_count) noexcept {
-    const std::uint64_t sequence = next_sequence_++;
-    const std::uint64_t span_id = next_span_id_++;
-    return TimelineEvent{sequence,
-                         span_id,
-                         parent_span_id,
-                         frame_id,
-                         TimelineLane::ui,
-                         phase,
-                         TimelineOutcome::completed,
-                         clock_->now(),
-                         {},
-                         pass,
-                         work_count};
+  [[nodiscard]] TimelineEvent begin(TimelineLane lane, TimelinePhase phase,
+                                    std::uint64_t parent_span_id, std::uint64_t frame_id,
+                                    std::size_t pass, std::size_t work_count) noexcept {
+    std::uint64_t sequence;
+    std::uint64_t span_id;
+    {
+      std::lock_guard lock{state_mutex_};
+      sequence = next_nonzero(next_sequence_);
+      span_id = next_nonzero(next_span_id_);
+    }
+    std::chrono::nanoseconds start;
+    {
+      std::lock_guard lock{clock_mutex_};
+      start = clock_->now();
+    }
+    return TimelineEvent{
+      sequence, span_id, parent_span_id, frame_id,  lane, phase, TimelineOutcome::completed,
+      start,    {},      pass,           work_count};
   }
 
   void finish(TimelineEvent event, TimelineOutcome outcome) noexcept {
-    const auto end = clock_->now();
+    std::chrono::nanoseconds end;
+    {
+      std::lock_guard lock{clock_mutex_};
+      end = clock_->now();
+    }
     event.outcome = outcome;
     event.duration = end >= event.start ? end - event.start : std::chrono::nanoseconds{};
+    std::lock_guard lock{state_mutex_};
     if (event_count_ < events_.size()) {
       events_[(first_event_ + event_count_) % events_.size()] = event;
       ++event_count_;
@@ -66,26 +74,43 @@ public:
 
   [[nodiscard]] TimelineSnapshot snapshot() const {
     TimelineSnapshot result;
-    result.events.reserve(event_count_);
-    for (std::size_t index = 0; index < event_count_; ++index) {
-      result.events.push_back(events_[(first_event_ + index) % events_.size()]);
+    {
+      std::lock_guard lock{state_mutex_};
+      result.events.reserve(event_count_);
+      for (std::size_t index = 0; index < event_count_; ++index) {
+        result.events.push_back(events_[(first_event_ + index) % events_.size()]);
+      }
+      result.dropped_event_count = dropped_event_count_;
     }
     std::ranges::sort(result.events, {}, &TimelineEvent::sequence);
-    result.dropped_event_count = dropped_event_count_;
     return result;
   }
 
   void clear() noexcept {
+    std::lock_guard lock{state_mutex_};
     first_event_ = 0;
     event_count_ = 0;
     dropped_event_count_ = 0;
   }
 
-  [[nodiscard]] std::uint64_t next_frame_id() noexcept { return next_frame_id_++; }
+  [[nodiscard]] std::uint64_t next_frame_id() noexcept {
+    std::lock_guard lock{state_mutex_};
+    return next_nonzero(next_frame_id_);
+  }
 
 private:
+  static std::uint64_t next_nonzero(std::uint64_t& value) noexcept {
+    std::uint64_t result = value++;
+    if (result == 0) {
+      result = value++;
+    }
+    return result;
+  }
+
   std::vector<TimelineEvent> events_;
   std::shared_ptr<TimelineClock> clock_;
+  mutable std::mutex state_mutex_;
+  mutable std::mutex clock_mutex_;
   std::size_t first_event_{};
   std::size_t event_count_{};
   std::size_t dropped_event_count_{};
@@ -106,10 +131,10 @@ TimelineSnapshot TimelineRecorder::snapshot() const { return impl_->snapshot(); 
 
 void TimelineRecorder::clear() noexcept { impl_->clear(); }
 
-TimelineEvent TimelineRecorder::begin(TimelinePhase phase, std::uint64_t parent_span_id,
-                                      std::uint64_t frame_id, std::size_t pass,
-                                      std::size_t work_count) noexcept {
-  return impl_->begin(phase, parent_span_id, frame_id, pass, work_count);
+TimelineEvent TimelineRecorder::begin(TimelineLane lane, TimelinePhase phase,
+                                      std::uint64_t parent_span_id, std::uint64_t frame_id,
+                                      std::size_t pass, std::size_t work_count) noexcept {
+  return impl_->begin(lane, phase, parent_span_id, frame_id, pass, work_count);
 }
 
 void TimelineRecorder::finish(TimelineEvent event, TimelineOutcome outcome) noexcept {
@@ -230,8 +255,9 @@ BuildOwner::TimelineSpan BuildOwner::begin_timeline(TimelinePhase phase,
   if (recorder == nullptr) {
     return {};
   }
-  return TimelineSpan{*this, recorder,
-                      recorder->begin(phase, parent_span_id, frame_id, pass, work_count)};
+  return TimelineSpan{
+    *this, recorder,
+    recorder->begin(TimelineLane::ui, phase, parent_span_id, frame_id, pass, work_count)};
 }
 
 void BuildOwner::finish_timeline(const std::shared_ptr<TimelineRecorder>& recorder,
@@ -750,6 +776,8 @@ std::string_view timeline_lane_name(TimelineLane lane) {
   switch (lane) {
   case TimelineLane::ui:
     return "ui";
+  case TimelineLane::raster:
+    return "raster";
   }
   throw std::invalid_argument("Timeline event has an unknown lane");
 }
@@ -770,6 +798,14 @@ std::string_view timeline_phase_name(TimelinePhase phase) {
     return "lazyRealization";
   case TimelinePhase::composite:
     return "composite";
+  case TimelinePhase::raster_frame:
+    return "rasterFrame";
+  case TimelinePhase::surface_acquire:
+    return "surfaceAcquire";
+  case TimelinePhase::rasterize:
+    return "rasterize";
+  case TimelinePhase::surface_present:
+    return "surfacePresent";
   }
   throw std::invalid_argument("Timeline event has an unknown phase");
 }
@@ -778,6 +814,12 @@ std::string_view timeline_outcome_name(TimelineOutcome outcome) {
   switch (outcome) {
   case TimelineOutcome::completed:
     return "completed";
+  case TimelineOutcome::unavailable:
+    return "unavailable";
+  case TimelineOutcome::out_of_date:
+    return "outOfDate";
+  case TimelineOutcome::lost:
+    return "lost";
   case TimelineOutcome::failed:
     return "failed";
   }
@@ -890,14 +932,28 @@ std::string InspectorSnapshot::to_json() const {
 }
 
 std::string TimelineSnapshot::to_json() const {
-  std::ostringstream output;
-  output.imbue(std::locale::classic());
-  output << "{\"version\":1,\"droppedEventCount\":" << dropped_event_count << ",\"events\":[";
-  for (std::size_t index = 0; index < events.size(); ++index) {
-    const TimelineEvent& event = events[index];
+  std::size_t version = 1;
+  for (const TimelineEvent& event : events) {
+    static_cast<void>(timeline_lane_name(event.lane));
+    static_cast<void>(timeline_phase_name(event.phase));
+    static_cast<void>(timeline_outcome_name(event.outcome));
     if (event.duration < std::chrono::nanoseconds::zero()) {
       throw std::invalid_argument("Timeline event duration cannot be negative");
     }
+    if (event.lane == TimelineLane::raster || event.phase == TimelinePhase::raster_frame ||
+        event.phase == TimelinePhase::surface_acquire || event.phase == TimelinePhase::rasterize ||
+        event.phase == TimelinePhase::surface_present ||
+        event.outcome == TimelineOutcome::unavailable ||
+        event.outcome == TimelineOutcome::out_of_date || event.outcome == TimelineOutcome::lost) {
+      version = 2;
+    }
+  }
+  std::ostringstream output;
+  output.imbue(std::locale::classic());
+  output << "{\"version\":" << version << ",\"droppedEventCount\":" << dropped_event_count
+         << ",\"events\":[";
+  for (std::size_t index = 0; index < events.size(); ++index) {
+    const TimelineEvent& event = events[index];
     if (index != 0) {
       output << ',';
     }

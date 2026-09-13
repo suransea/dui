@@ -1,5 +1,8 @@
 #include "dui/ui.hpp"
 
+#include <atomic>
+#include <array>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdlib>
@@ -20,6 +23,20 @@ void require(bool condition, const std::string& message) {
     throw std::runtime_error(message);
   }
 }
+
+class StepTimelineClock final : public dui::TimelineClock {
+public:
+  std::chrono::nanoseconds now() const noexcept override {
+    ++call_count_;
+    return std::chrono::nanoseconds{tick_++};
+  }
+
+  [[nodiscard]] std::size_t call_count() const { return call_count_; }
+
+private:
+  mutable std::int64_t tick_{};
+  mutable std::size_t call_count_{};
+};
 
 struct FrameState {
   int presents{};
@@ -198,8 +215,10 @@ void raster_thread_submits_immutable_frames_in_order() {
 
   auto surface = std::make_shared<ContractSurface>();
   auto log = std::make_shared<RenderLog>();
-  dui::RasterThread raster{surface,
-                           [log] { return std::make_unique<RecordingSurfaceRenderer>(log); }};
+  auto clock = std::make_shared<StepTimelineClock>();
+  auto timeline = std::make_shared<dui::TimelineRecorder>(32, clock);
+  dui::RasterThread raster{
+    surface, [log] { return std::make_unique<RecordingSurfaceRenderer>(log); }, timeline};
   const auto first_ticket = raster.submit(first, {{100.0, 100.0}, 100, 100, 1.0, 1});
   const auto second_ticket = raster.submit(second, {{100.0, 100.0}, 100, 100, 1.0, 2});
   require(first_ticket.id() != 0 && second_ticket.id() > first_ticket.id(),
@@ -223,6 +242,39 @@ void raster_thread_submits_immutable_frames_in_order() {
   require(surface->state->presents == 2 && surface->state->abandons == 0,
           "rendered frames were not presented exactly once");
   require(raster.pending_count() == 0, "raster queue did not drain");
+
+  const auto trace = timeline->snapshot();
+  require(trace.events.size() == 8 && trace.dropped_event_count == 0,
+          "raster timeline omitted successful frame phases");
+  const std::array expected_phases{
+    dui::TimelinePhase::raster_frame, dui::TimelinePhase::surface_acquire,
+    dui::TimelinePhase::rasterize, dui::TimelinePhase::surface_present};
+  const std::array frame_ids{first_ticket.id(), second_ticket.id()};
+  for (std::size_t frame_index = 0; frame_index < frame_ids.size(); ++frame_index) {
+    const std::size_t first_event = frame_index * expected_phases.size();
+    const auto root_span = trace.events[first_event].span_id;
+    for (std::size_t phase_index = 0; phase_index < expected_phases.size(); ++phase_index) {
+      const auto& event = trace.events[first_event + phase_index];
+      require(event.sequence == first_event + phase_index + 1 &&
+                event.phase == expected_phases[phase_index] &&
+                event.lane == dui::TimelineLane::raster &&
+                event.frame_id == frame_ids[frame_index] &&
+                event.outcome == dui::TimelineOutcome::completed && event.pass == 0 &&
+                event.work_count == 1,
+              "successful raster timeline phase metadata was incorrect");
+      if (phase_index != 0) {
+        require(event.parent_span_id == root_span && event.duration == std::chrono::nanoseconds{1},
+                "raster child span had incorrect parent or duration");
+      }
+    }
+    require(trace.events[first_event].parent_span_id == 0 &&
+              trace.events[first_event].duration == std::chrono::nanoseconds{7},
+            "raster root span timing or parent was incorrect");
+  }
+  require(trace.to_json().starts_with("{\"version\":2") &&
+            trace.to_json().contains("\"lane\":\"raster\"") &&
+            trace.to_json().contains("\"phase\":\"surfacePresent\""),
+          "raster timeline did not select canonical JSON version 2");
 }
 
 class ThrowingRenderer final : public dui::SurfaceRenderer {
@@ -236,7 +288,8 @@ void renderer_failure_is_reported_to_waiter() {
   dui::BuildOwner owner;
   owner.render(dui::Text{"frame"});
   auto surface = std::make_shared<ContractSurface>();
-  dui::RasterThread raster{surface, [] { return std::make_unique<ThrowingRenderer>(); }};
+  auto timeline = std::make_shared<dui::TimelineRecorder>(8, std::make_shared<StepTimelineClock>());
+  dui::RasterThread raster{surface, [] { return std::make_unique<ThrowingRenderer>(); }, timeline};
   const auto frame = raster.submit(owner.layer_frame(dui::BoxConstraints::tight({100.0, 100.0})),
                                    {{100.0, 100.0}, 100, 100, 1.0, 1});
 
@@ -248,6 +301,14 @@ void renderer_failure_is_reported_to_waiter() {
   }
   require(reported, "raster renderer failure was swallowed");
   require(surface->state->abandons == 1, "failed render did not abandon acquired frame");
+  const auto trace = timeline->snapshot();
+  require(trace.events.size() == 3 && trace.events[0].phase == dui::TimelinePhase::raster_frame &&
+            trace.events[0].outcome == dui::TimelineOutcome::failed &&
+            trace.events[1].phase == dui::TimelinePhase::surface_acquire &&
+            trace.events[1].outcome == dui::TimelineOutcome::completed &&
+            trace.events[2].phase == dui::TimelinePhase::rasterize &&
+            trace.events[2].outcome == dui::TimelineOutcome::failed,
+          "renderer failure timeline was incomplete or reported a present phase");
 }
 
 class StoppingRenderer final : public dui::SurfaceRenderer {
@@ -260,6 +321,28 @@ public:
 
 private:
   dui::RasterThread** owner_;
+};
+
+struct RenderGate {
+  std::mutex mutex;
+  std::condition_variable ready;
+  bool entered{};
+  bool released{};
+};
+
+class BlockingRenderer final : public dui::SurfaceRenderer {
+public:
+  explicit BlockingRenderer(std::shared_ptr<RenderGate> gate) : gate_(std::move(gate)) {}
+
+  void render(dui::SurfaceFrame&, const dui::LayerTree&, const dui::SurfaceRequest&) override {
+    std::unique_lock lock{gate_->mutex};
+    gate_->entered = true;
+    gate_->ready.notify_one();
+    gate_->ready.wait(lock, [&] { return gate_->released; });
+  }
+
+private:
+  std::shared_ptr<RenderGate> gate_;
 };
 
 void renderer_callback_can_request_quiescent_stop() {
@@ -283,6 +366,52 @@ void renderer_callback_can_request_quiescent_stop() {
   require(rejected, "RasterThread accepted work after requested stop");
 }
 
+void queued_cancellation_emits_no_raster_timeline_event() {
+  dui::BuildOwner owner;
+  owner.render(dui::Text{"queued cancellation"});
+  const auto tree = owner.layer_frame(dui::BoxConstraints::tight({100.0, 100.0}));
+  const dui::SurfaceRequest request{{100.0, 100.0}, 100, 100, 1.0, 1};
+  auto gate = std::make_shared<RenderGate>();
+  auto surface = std::make_shared<ContractSurface>();
+  auto timeline =
+    std::make_shared<dui::TimelineRecorder>(16, std::make_shared<StepTimelineClock>());
+  dui::RasterThread raster{surface, [gate] { return std::make_unique<BlockingRenderer>(gate); },
+                           timeline};
+  const auto active = raster.submit(tree, request);
+  {
+    std::unique_lock lock{gate->mutex};
+    gate->ready.wait(lock, [&] { return gate->entered; });
+  }
+  timeline->clear();
+  std::weak_ptr<dui::TimelineRecorder> retained_timeline = timeline;
+  timeline.reset();
+  auto queued_request = request;
+  queued_request.generation = 2;
+  const auto queued = raster.submit(tree, queued_request);
+  raster.request_stop();
+  require(queued.wait() == dui::RasterThread::FrameOutcome::canceled,
+          "queued raster frame was not canceled by stop");
+  {
+    std::lock_guard lock{gate->mutex};
+    gate->released = true;
+  }
+  gate->ready.notify_one();
+  require(active.wait() == dui::RasterThread::FrameOutcome::presented,
+          "active raster frame did not finish after stop");
+  raster.wait_idle();
+  const auto recorder = retained_timeline.lock();
+  require(recorder != nullptr, "RasterThread did not retain its timeline recorder");
+  const auto trace = recorder->snapshot();
+  require(trace.events.size() == 3 && trace.events[0].phase == dui::TimelinePhase::raster_frame &&
+            trace.events[1].phase == dui::TimelinePhase::rasterize &&
+            trace.events[2].phase == dui::TimelinePhase::surface_present,
+          "timeline clear did not remove a completed acquire or retain in-progress spans");
+  for (const auto& event : trace.events) {
+    require(event.frame_id == active.id() && event.frame_id != queued.id(),
+            "queued cancellation appeared in the raster timeline");
+  }
+}
+
 void raster_thread_classifies_surface_acquisition_results() {
   dui::BuildOwner owner;
   owner.render(dui::Text{"frame"});
@@ -294,8 +423,10 @@ void raster_thread_classifies_surface_acquisition_results() {
     auto surface = std::make_shared<ContractSurface>();
     surface->next_status = status;
     auto log = std::make_shared<RenderLog>();
-    dui::RasterThread raster{surface,
-                             [log] { return std::make_unique<RecordingSurfaceRenderer>(log); }};
+    auto timeline =
+      std::make_shared<dui::TimelineRecorder>(8, std::make_shared<StepTimelineClock>());
+    dui::RasterThread raster{
+      surface, [log] { return std::make_unique<RecordingSurfaceRenderer>(log); }, timeline};
     const auto frame = raster.submit(tree, request);
     const auto expected = status == dui::SurfaceAcquireStatus::unavailable
                             ? dui::RasterThread::FrameOutcome::unavailable
@@ -303,13 +434,24 @@ void raster_thread_classifies_surface_acquisition_results() {
     require(frame.wait() == expected, "transient surface result was not reported");
     raster.wait_idle();
     require(log->frames.empty(), "non-ready surface reached renderer");
+    const auto trace = timeline->snapshot();
+    const auto timeline_outcome = status == dui::SurfaceAcquireStatus::unavailable
+                                    ? dui::TimelineOutcome::unavailable
+                                    : dui::TimelineOutcome::out_of_date;
+    require(trace.events.size() == 2 && trace.events[0].phase == dui::TimelinePhase::raster_frame &&
+              trace.events[0].outcome == timeline_outcome &&
+              trace.events[1].phase == dui::TimelinePhase::surface_acquire &&
+              trace.events[1].outcome == timeline_outcome,
+            "transient acquisition timeline reported later raster phases");
   }
 
   auto lost_surface = std::make_shared<ContractSurface>();
   lost_surface->next_status = dui::SurfaceAcquireStatus::lost;
   auto log = std::make_shared<RenderLog>();
-  dui::RasterThread lost{lost_surface,
-                         [log] { return std::make_unique<RecordingSurfaceRenderer>(log); }};
+  auto lost_timeline =
+    std::make_shared<dui::TimelineRecorder>(8, std::make_shared<StepTimelineClock>());
+  dui::RasterThread lost{
+    lost_surface, [log] { return std::make_unique<RecordingSurfaceRenderer>(log); }, lost_timeline};
   const auto lost_frame = lost.submit(tree, request);
   bool failed = false;
   try {
@@ -318,6 +460,12 @@ void raster_thread_classifies_surface_acquisition_results() {
     failed = true;
   }
   require(failed, "lost raster surface was not terminal");
+  const auto lost_trace = lost_timeline->snapshot();
+  require(lost_trace.events.size() == 2 &&
+            lost_trace.events[0].outcome == dui::TimelineOutcome::lost &&
+            lost_trace.events[1].phase == dui::TimelinePhase::surface_acquire &&
+            lost_trace.events[1].outcome == dui::TimelineOutcome::lost,
+          "surface acquisition loss was not preserved in the raster timeline");
 
   auto valid_surface = std::make_shared<ContractSurface>();
   dui::RasterThread validating{
@@ -332,6 +480,113 @@ void raster_thread_classifies_surface_acquisition_results() {
   require(mismatch_rejected, "RasterThread accepted surface metrics for another LayerTree");
 }
 
+void raster_timeline_classifies_present_results_and_disabled_path() {
+  dui::BuildOwner owner;
+  owner.render(dui::Text{"present timeline"});
+  const auto tree = owner.layer_frame(dui::BoxConstraints::tight({100.0, 100.0}));
+  const dui::SurfaceRequest request{{100.0, 100.0}, 100, 100, 1.0, 1};
+
+  auto disabled_clock = std::make_shared<StepTimelineClock>();
+  auto unused = std::make_shared<dui::TimelineRecorder>(8, disabled_clock);
+  auto disabled_surface = std::make_shared<ContractSurface>();
+  auto disabled_log = std::make_shared<RenderLog>();
+  dui::RasterThread disabled{disabled_surface, [disabled_log] {
+                               return std::make_unique<RecordingSurfaceRenderer>(disabled_log);
+                             }};
+  require(disabled.submit(tree, request).wait() == dui::RasterThread::FrameOutcome::presented &&
+            disabled_clock->call_count() == 0 && unused->snapshot().events.empty(),
+          "raster thread read an unattached timeline clock");
+
+  for (const auto status : {dui::SurfaceFrameDelegate::PresentStatus::out_of_date,
+                            dui::SurfaceFrameDelegate::PresentStatus::lost}) {
+    auto surface = std::make_shared<ContractSurface>();
+    surface->state->present_status = status;
+    auto timeline =
+      std::make_shared<dui::TimelineRecorder>(8, std::make_shared<StepTimelineClock>());
+    auto log = std::make_shared<RenderLog>();
+    dui::RasterThread raster{
+      surface, [log] { return std::make_unique<RecordingSurfaceRenderer>(log); }, timeline};
+    const auto ticket = raster.submit(tree, request);
+    bool lost = false;
+    dui::RasterThread::FrameOutcome outcome = dui::RasterThread::FrameOutcome::failed;
+    try {
+      outcome = ticket.wait();
+    } catch (const std::runtime_error&) {
+      lost = true;
+    }
+    const auto trace = timeline->snapshot();
+    const auto timeline_outcome = status == dui::SurfaceFrameDelegate::PresentStatus::out_of_date
+                                    ? dui::TimelineOutcome::out_of_date
+                                    : dui::TimelineOutcome::lost;
+    require(trace.events.size() == 4 && trace.events[0].outcome == timeline_outcome &&
+              trace.events[1].outcome == dui::TimelineOutcome::completed &&
+              trace.events[2].outcome == dui::TimelineOutcome::completed &&
+              trace.events[3].phase == dui::TimelinePhase::surface_present &&
+              trace.events[3].outcome == timeline_outcome,
+            "surface present timeline outcome or phase sequence was incorrect");
+    require(status == dui::SurfaceFrameDelegate::PresentStatus::out_of_date
+              ? outcome == dui::RasterThread::FrameOutcome::out_of_date && !lost
+              : lost,
+            "timeline instrumentation changed the surface present result");
+  }
+}
+
+void timeline_recorder_supports_concurrent_ui_raster_observation_and_clear() {
+  auto clock = std::make_shared<StepTimelineClock>();
+  auto timeline = std::make_shared<dui::TimelineRecorder>(64, clock);
+  auto surface = std::make_shared<ContractSurface>();
+  auto log = std::make_shared<RenderLog>();
+  dui::RasterThread raster{
+    surface, [log] { return std::make_unique<RecordingSurfaceRenderer>(log); }, timeline};
+  dui::BuildOwner owner;
+  owner.set_timeline_recorder(timeline);
+
+  std::atomic<bool> done{};
+  std::atomic<bool> invalid{};
+  std::thread observer{[&] {
+    while (!done.load()) {
+      const auto snapshot = timeline->snapshot();
+      try {
+        static_cast<void>(snapshot.to_json());
+      } catch (...) {
+        invalid.store(true);
+      }
+      for (const auto& event : snapshot.events) {
+        if (event.sequence == 0 || event.span_id == 0 ||
+            event.duration < std::chrono::nanoseconds::zero() ||
+            (event.lane == dui::TimelineLane::raster &&
+             event.phase != dui::TimelinePhase::raster_frame && event.parent_span_id == 0)) {
+          invalid.store(true);
+        }
+      }
+    }
+  }};
+  std::thread clearer{[&] {
+    while (!done.load()) {
+      timeline->clear();
+      std::this_thread::yield();
+    }
+  }};
+
+  std::vector<dui::RasterThread::FrameTicket> tickets;
+  for (std::size_t frame = 0; frame < 32; ++frame) {
+    owner.render(dui::Text{"concurrent " + std::to_string(frame)});
+    tickets.push_back(
+      raster.submit(owner.layer_frame(dui::BoxConstraints::tight({100.0, 100.0})),
+                    {{100.0, 100.0}, 100, 100, 1.0, static_cast<std::uint64_t>(frame + 1)}));
+  }
+  for (const auto& ticket : tickets) {
+    require(ticket.wait() == dui::RasterThread::FrameOutcome::presented,
+            "concurrent timeline collection changed a raster result");
+  }
+  raster.wait_idle();
+  done.store(true);
+  observer.join();
+  clearer.join();
+  require(!invalid.load() && clock->call_count() != 0,
+          "concurrent timeline snapshot, clear, or serialization was inconsistent");
+}
+
 } // namespace
 
 int main() {
@@ -342,7 +597,10 @@ int main() {
     raster_thread_submits_immutable_frames_in_order();
     renderer_failure_is_reported_to_waiter();
     renderer_callback_can_request_quiescent_stop();
+    queued_cancellation_emits_no_raster_timeline_event();
     raster_thread_classifies_surface_acquisition_results();
+    raster_timeline_classifies_present_results_and_disabled_path();
+    timeline_recorder_supports_concurrent_ui_raster_observation_and_clear();
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';
     return EXIT_FAILURE;
