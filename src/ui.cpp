@@ -364,9 +364,9 @@ std::uint64_t BuildOwner::next_timeline_flow_id() noexcept {
 }
 
 void BuildOwner::set_timeline_recorder(std::shared_ptr<TimelineRecorder> recorder) {
-  if (reconciling_ || framing_) {
+  if (reconciling_ || framing_ || formatting_state_) {
     throw std::logic_error(
-      "BuildOwner cannot change its timeline recorder during reconciliation or framing");
+      "BuildOwner cannot change its timeline recorder during an active owner operation");
   }
   timeline_recorder_ = std::move(recorder);
 }
@@ -403,6 +403,7 @@ void BuildOwner::unmount(std::unique_ptr<Element>& element) {
   if (element == nullptr) {
     return;
   }
+  StateFormattingScope formatting{*this};
 
   for (auto& [slot, resource] : element->resources_) {
     static_cast<void>(slot);
@@ -430,6 +431,21 @@ void BuildOwner::mark_dirty(Element::Id id, std::uint64_t generation) {
   element->dirty_ = true;
 }
 
+void BuildOwner::refresh_state_inspection(Element::Id id, std::uint64_t generation,
+                                          std::uint64_t slot) noexcept {
+  Element* element = resolve(id, generation);
+  if (element == nullptr) {
+    return;
+  }
+  const auto found = element->state_.find(slot);
+  if (found != element->state_.end()) {
+    const bool previous = formatting_state_;
+    formatting_state_ = true;
+    found->second.refresh_inspected_value();
+    formatting_state_ = previous;
+  }
+}
+
 Element* BuildOwner::resolve(Element::Id id, std::uint64_t generation) const {
   const auto found = registry_.find(id);
   if (found == registry_.end() || found->second->generation_ != generation) {
@@ -442,7 +458,7 @@ void BuildOwner::flush() { flush_with_timeline(0, 0, 0); }
 
 void BuildOwner::flush_with_timeline(std::uint64_t parent_span_id, std::uint64_t frame_id,
                                      std::uint64_t flow_id) {
-  if (reconciling_) {
+  if (reconciling_ || formatting_state_) {
     throw std::logic_error("BuildOwner does not allow reentrant render or flush");
   }
   reconciling_ = true;
@@ -568,7 +584,7 @@ bool BuildOwner::realize_lazy_children() {
 }
 
 LayerTree BuildOwner::layer_frame(BoxConstraints viewport) {
-  if (framing_) {
+  if (framing_ || formatting_state_) {
     throw std::logic_error("BuildOwner does not allow reentrant frame production");
   }
   framing_ = true;
@@ -991,8 +1007,26 @@ void append_json_node(std::ostringstream& output, const InspectorNode& node, std
   append_json_string(output, inspector_state_name(node.state));
   output << ",\"updateCount\":" << node.update_count << ",\"dirty\":";
   append_json_bool(output, node.dirty);
-  output << ",\"stateSlotCount\":" << node.state_slot_count
-         << ",\"dependencyCount\":" << node.dependency_count
+  output << ",\"stateSlotCount\":" << node.state_slot_count;
+  if (!node.state_values.empty()) {
+    output << ",\"stateValues\":[";
+    for (std::size_t index = 0; index < node.state_values.size(); ++index) {
+      if (index != 0) {
+        output << ',';
+      }
+      output << "{\"name\":";
+      append_json_string(output, node.state_values[index].name);
+      output << ",\"value\":";
+      if (node.state_values[index].value.has_value()) {
+        append_json_string(output, *node.state_values[index].value);
+      } else {
+        output << "null";
+      }
+      output << '}';
+    }
+    output << ']';
+  }
+  output << ",\"dependencyCount\":" << node.dependency_count
          << ",\"environmentCount\":" << node.environment_count
          << ",\"resourceCount\":" << node.resource_count << ",\"hasFocusNode\":";
   append_json_bool(output, node.has_focus_node);
@@ -1229,7 +1263,15 @@ InspectorSnapshot BuildOwner::inspect() const {
                        element.focus_node_ != nullptr,
                        element.focus_node_ != nullptr && element.focus_node_ == focused_node,
                        std::move(render_snapshot),
+                       {},
                        {}};
+    for (const auto& [slot, value] : element.state_) {
+      static_cast<void>(slot);
+      if (value.inspector) {
+        node.state_values.push_back({value.name, value.inspected_value});
+      }
+    }
+    std::ranges::sort(node.state_values, {}, &InspectorStateSnapshot::name);
     node.children.reserve(element.children_.size() + element.lazy_kept_alive_children_.size());
     for (const auto& child : element.children_) {
       if (child != nullptr) {

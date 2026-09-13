@@ -821,6 +821,44 @@ cursor non-retention and recorder mismatch, zero limits, detached batch lifetime
 concurrent UI/raster production with polling and clear, and unchanged
 snapshot/serialization behavior.
 
+The inspector-state-values slice keeps state private by default and adds an
+explicit formatting overload, `BuildContext::state<Name>(initial, formatter)`.
+The formatter is copyable, receives `const T&`, and returns a string-convertible
+value. The ordinary one-argument state declaration removes any formatter from
+that named slot, so exposure can be revoked by the current build. Equal-view
+reconciliation that skips a build preserves the last mounted declaration.
+
+Each opted-in state slot caches only its formatted string. The cache is refreshed
+when the formatter is installed during build and after a successful
+`StateHandle::set()` assignment; `update()` inherits the same path. Formatting
+does not run from `BuildOwner::inspect()`, snapshot lookup, equality, or JSON
+serialization, keeping inspection passive and preventing callbacks under tooling
+code. Formatter exceptions, including allocation failure while producing the
+string, are caught and represented as an unavailable value without changing the
+state assignment, dirty scheduling, or user exception behavior. Registration of
+the formatter itself remains ordinary build work and may fail before installation.
+Formatter installation, stored-target replacement or revocation, Element
+unmount, cache refresh, and their user-defined copy/destruction hooks execute
+under an owner guard that
+rejects reentrant render, flush, frame production, recorder replacement, and
+state declaration or `StateHandle` mutation. A formatter therefore cannot
+unmount, rehash the state map, or recursively rewrite the slot whose cache
+receives its result. Rejection during formatting is isolated like any other
+formatter failure.
+
+`InspectorNode` appends a detached `state_values` vector whose entries contain
+the declared state name and an optional formatted value. Capture includes only
+opted-in slots and sorts entries by bytewise state name because Element storage
+is unordered. Canonical inspector JSON preserves existing bytes when the vector
+is empty; otherwise it inserts `stateValues` immediately after `stateSlotCount`,
+with each entry encoded as fixed-order `name` and string-or-null `value` fields.
+Snapshots never retain the formatter, `std::any`, state object, Element, owner,
+or arbitrary captured resources. Acceptance covers default privacy and byte
+compatibility, custom formatting and escaping, deterministic multi-slot order,
+immediate refresh after set/update, formatter replacement and revocation,
+exception-to-null isolation, detached snapshot lifetime, dormant keep-alive
+values, and unchanged state identity/rebuild behavior.
+
 ## Prototype acceptance criteria
 
 M0 is accepted when headless tests demonstrate:

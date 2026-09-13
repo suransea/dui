@@ -563,6 +563,131 @@ struct InspectDuringBuild {
   }
 };
 
+struct InspectorStateValuesComponent {
+  std::optional<dui::StateHandle<int>>* handle;
+  bool expose;
+  std::string prefix;
+  dui::BuildOwner* owner;
+  bool* reentrant_rejected;
+
+  auto build(dui::BuildContext& context) const {
+    auto count =
+      expose
+        ? context.state<"z-count">(2,
+                                   [prefix = prefix, owner = owner, handle = handle,
+                                    reentrant_rejected = reentrant_rejected](const int& value) {
+                                     if (value == 13) {
+                                       throw std::runtime_error("inspection failed");
+                                     }
+                                     if (value == 99) {
+                                       try {
+                                         owner->render(dui::Text{"replacement"});
+                                       } catch (const std::logic_error&) {
+                                         *reentrant_rejected = true;
+                                         throw;
+                                       }
+                                     }
+                                     if (prefix == "mutate:" && value == 14) {
+                                       try {
+                                         handle->value().set(15);
+                                       } catch (const std::logic_error&) {
+                                         *reentrant_rejected = true;
+                                         throw;
+                                       }
+                                     }
+                                     return prefix + std::to_string(value);
+                                   })
+        : context.state<"z-count">(2);
+    auto label = expose ? context.state<"a-label">(
+                            std::string{"safe"},
+                            [](const std::string& value) { return "label=\"" + value + "\"\n"; })
+                        : context.state<"a-label">(std::string{"safe"});
+    static_cast<void>(context.state<"private">(99));
+    *handle = count;
+    return dui::Text{label.get() + std::to_string(count.get())};
+  }
+};
+
+struct InspectorFormatterLifecycleControl {
+  std::optional<dui::StateHandle<int>> handle;
+  dui::BuildOwner* owner{};
+  bool attack_copy{};
+  bool attack_destruction{};
+  bool attack_render{};
+  bool copy_rejected{};
+  bool destruction_rejected{};
+};
+
+struct ReentrantInspectorFormatter {
+  explicit ReentrantInspectorFormatter(std::shared_ptr<InspectorFormatterLifecycleControl> control)
+    : control(std::move(control)) {}
+
+  ReentrantInspectorFormatter(const ReentrantInspectorFormatter& other) : control(other.control) {
+    attack(control->attack_copy, control->copy_rejected);
+  }
+  ReentrantInspectorFormatter(ReentrantInspectorFormatter&&) noexcept = default;
+  ~ReentrantInspectorFormatter() {
+    if (control != nullptr) {
+      attack(control->attack_destruction, control->destruction_rejected);
+    }
+  }
+
+  std::string operator()(const int& value) const { return std::to_string(value); }
+
+  std::shared_ptr<InspectorFormatterLifecycleControl> control;
+
+private:
+  void attack(bool enabled, bool& rejected) const noexcept {
+    if (!enabled) {
+      return;
+    }
+    try {
+      if (control->attack_render) {
+        control->owner->render(dui::Text{"destructor replacement"});
+      } else if (control->handle.has_value()) {
+        control->handle->set(77);
+      }
+    } catch (const std::logic_error&) {
+      rejected = true;
+    } catch (...) {
+    }
+  }
+};
+
+struct InspectorFormatterLifecycleComponent {
+  std::shared_ptr<InspectorFormatterLifecycleControl> control;
+  bool expose;
+
+  auto build(dui::BuildContext& context) const {
+    auto state = [&] {
+      if (!expose) {
+        return context.state<"lifecycle">(5);
+      }
+      const ReentrantInspectorFormatter formatter{control};
+      return context.state<"lifecycle">(5, formatter);
+    }();
+    control->handle = state;
+    return dui::Text{std::to_string(state.get())};
+  }
+};
+
+struct InspectorContextReentrantComponent {
+  bool* rejected;
+
+  auto build(dui::BuildContext& context) const {
+    auto state = context.state<"value">(1, [context = &context, rejected = rejected](const int&) {
+      try {
+        static_cast<void>(context->state<"nested">(2));
+      } catch (const std::logic_error&) {
+        *rejected = true;
+        throw;
+      }
+      return std::string{"unreachable"};
+    });
+    return dui::Text{std::to_string(state.get())};
+  }
+};
+
 void structured_inspector_is_detached_and_deterministic() {
   dui::BuildOwner owner;
   const auto empty = owner.inspect();
@@ -594,6 +719,8 @@ void structured_inspector_is_detached_and_deterministic() {
   const std::string dirty_json = dirty.to_json();
   require(dirty_json == owner.inspect().to_json() && dirty_json.contains("value=\\\"9\\\"\\\\\\n"),
           "inspector JSON was nondeterministic or failed to escape debug text");
+  require(!dirty_json.contains("\"stateValues\""),
+          "ordinary state unexpectedly appeared in inspector JSON");
 
   [[maybe_unused]] const auto frame = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
   const auto framed = owner.inspect();
@@ -657,6 +784,105 @@ void structured_inspector_is_detached_and_deterministic() {
     deep_json_rejected = true;
   }
   require(deep_json_rejected, "inspector serialized beyond its safe maximum depth");
+
+  std::optional<dui::StateHandle<int>> inspected_state;
+  dui::BuildOwner state_owner;
+  bool formatter_reentrant_rejected = false;
+  state_owner.render(InspectorStateValuesComponent{&inspected_state, true, "first:", &state_owner,
+                                                   &formatter_reentrant_rejected});
+  const auto exposed = state_owner.inspect();
+  require(exposed.root.has_value() && exposed.root->state_slot_count == 3 &&
+            exposed.root->state_values.size() == 2 &&
+            exposed.root->state_values[0] ==
+              dui::InspectorStateSnapshot{"a-label", std::string{"label=\"safe\"\n"}} &&
+            exposed.root->state_values[1] ==
+              dui::InspectorStateSnapshot{"z-count", std::string{"first:2"}},
+          "inspector did not expose only opted-in state in deterministic name order");
+  const std::string exposed_json = exposed.to_json();
+  require(exposed_json.contains("\"stateSlotCount\":3,\"stateValues\":[{\"name\":\"a-label\","
+                                "\"value\":\"label=\\\"safe\\\"\\n\"},{\"name\":\"z-count\","
+                                "\"value\":\"first:2\"}],\"dependencyCount\":0"),
+          "inspector state values were not canonically encoded or escaped");
+
+  inspected_state->set(7);
+  const auto refreshed = state_owner.inspect();
+  require(refreshed.root->state_values[1].value == std::optional<std::string>{"first:7"} &&
+            exposed.root->state_values[1].value == std::optional<std::string>{"first:2"},
+          "state inspection did not refresh immediately or mutated a detached snapshot");
+  inspected_state->set(13);
+  const auto failed = state_owner.inspect();
+  require(inspected_state->get() == 13 && state_owner.pending_build_count() == 1 &&
+            !failed.root->state_values[1].value.has_value() &&
+            failed.to_json().contains("{\"name\":\"z-count\",\"value\":null}"),
+          "state inspection failure changed state behavior or was not encoded as null");
+  inspected_state->update([](int value) { return value + 1; });
+  require(state_owner.inspect().root->state_values[1].value ==
+            std::optional<std::string>{"first:14"},
+          "state inspection did not refresh through StateHandle::update");
+
+  const auto element_id = state_owner.root()->id();
+  state_owner.render(InspectorStateValuesComponent{&inspected_state, true, "mutate:", &state_owner,
+                                                   &formatter_reentrant_rejected});
+  require(formatter_reentrant_rejected && state_owner.root()->id() == element_id &&
+            inspected_state->get() == 14 &&
+            !state_owner.inspect().root->state_values[1].value.has_value(),
+          "state formatter installation allowed nested state mutation");
+  formatter_reentrant_rejected = false;
+  state_owner.render(InspectorStateValuesComponent{&inspected_state, true, "second:", &state_owner,
+                                                   &formatter_reentrant_rejected});
+  require(state_owner.root()->id() == element_id &&
+            state_owner.inspect().root->state_values[1].value ==
+              std::optional<std::string>{"second:14"},
+          "state inspector replacement changed identity or retained its old formatter");
+  inspected_state->set(99);
+  require(formatter_reentrant_rejected && state_owner.root()->id() == element_id &&
+            inspected_state->get() == 99 &&
+            !state_owner.inspect().root->state_values[1].value.has_value(),
+          "state formatter reentrancy unmounted its slot or changed assignment behavior");
+  state_owner.render(InspectorStateValuesComponent{&inspected_state, false, "unused:", &state_owner,
+                                                   &formatter_reentrant_rejected});
+  const auto revoked = state_owner.inspect();
+  require(revoked.root->state_values.empty() && !revoked.to_json().contains("\"stateValues\""),
+          "ordinary state declaration did not revoke inspector exposure or restore JSON privacy");
+
+  auto lifecycle = std::make_shared<InspectorFormatterLifecycleControl>();
+  dui::BuildOwner lifecycle_owner;
+  lifecycle->owner = &lifecycle_owner;
+  lifecycle_owner.render(InspectorFormatterLifecycleComponent{lifecycle, true});
+  lifecycle->handle->set(6);
+  lifecycle->attack_copy = true;
+  lifecycle_owner.render(InspectorFormatterLifecycleComponent{lifecycle, true});
+  require(lifecycle->copy_rejected && lifecycle->handle->get() == 6 &&
+            lifecycle_owner.inspect().root->state_values.front().value ==
+              std::optional<std::string>{"6"},
+          "formatter copy reentered state mutation or corrupted its cached value");
+  lifecycle->attack_copy = false;
+  lifecycle->attack_destruction = true;
+  lifecycle_owner.render(InspectorFormatterLifecycleComponent{lifecycle, false});
+  require(lifecycle->destruction_rejected && lifecycle->handle->get() == 6 &&
+            lifecycle_owner.inspect().root->state_values.empty(),
+          "formatter destruction reentered state mutation while revoking exposure");
+  lifecycle->attack_destruction = false;
+
+  auto unmount_lifecycle = std::make_shared<InspectorFormatterLifecycleControl>();
+  auto unmount_owner = std::make_unique<dui::BuildOwner>();
+  unmount_lifecycle->owner = unmount_owner.get();
+  unmount_owner->render(InspectorFormatterLifecycleComponent{unmount_lifecycle, true});
+  unmount_lifecycle->attack_destruction = true;
+  unmount_lifecycle->attack_render = true;
+  unmount_owner.reset();
+  require(unmount_lifecycle->destruction_rejected,
+          "formatter destruction reentered rendering while its Element was unmounting");
+  unmount_lifecycle->attack_destruction = false;
+
+  bool context_reentrant_rejected = false;
+  dui::BuildOwner context_owner;
+  context_owner.render(InspectorContextReentrantComponent{&context_reentrant_rejected});
+  const auto context_snapshot = context_owner.inspect();
+  require(context_reentrant_rejected && context_snapshot.root->state_slot_count == 1 &&
+            context_snapshot.root->state_values.size() == 1 &&
+            !context_snapshot.root->state_values.front().value.has_value(),
+          "formatter declared nested state through a captured BuildContext");
 }
 
 class StepTimelineClock final : public dui::TimelineClock {

@@ -321,6 +321,7 @@ technology observation remain target-OS work.
 Status: structured-inspector, concurrent UI/raster timeline collection,
 cross-lane flow correlation, canonical timeline serialization, and
 Chrome/Perfetto trace-export and incremental-transport slices implemented and
+verified. Opt-in inspector state-value formatting is also implemented and
 verified.
 
 `BuildOwner::inspect()` now captures an owned, passive Element-tree snapshot.
@@ -337,8 +338,24 @@ malformed bytes become deterministic `U+FFFD` escapes, and capture/serialization
 enforce a 512-node depth bound while lookup remains iterative. Existing
 `dump_tree()` output remains compatible. Tests cover empty, dirty, framed,
 keyed, focused, escaped/malformed UTF-8, bounded deep, deterministic, owner-
-independent, reentrancy-rejected, and dormant Sliver snapshots. Opt-in value
-inspection and GUI tooling remain pending.
+independent, reentrancy-rejected, and dormant Sliver snapshots. GUI tooling
+remains pending.
+
+The opt-in state-value slice adds a formatter overload to named state
+declarations while preserving default privacy. Slots cache only detached
+formatted strings and refresh them during formatter installation and successful
+state set/update operations, so inspection and serialization execute no user
+callbacks. Formatter failures become `null` without changing state assignment or
+dirty scheduling. Owner-operation guards cover formatter installation, target
+replacement/destruction, revocation, Element unmount, and refresh, preventing
+callbacks or lifecycle hooks from reentering state mutation or render/flush/frame
+paths, declaring nested state, or unmounting the slot receiving a result.
+Inspector nodes expose opted-in entries sorted by state name; nodes without
+entries retain their previous JSON bytes.
+Tests cover private and exposed slots, custom escaped output, deterministic
+multi-slot order, immediate set/update refresh, detached snapshots, formatter
+failure/copy/destruction/reentrancy isolation, replacement, revocation, and
+active-to-dormant keep-alive values.
 
 The initial timeline slice adds an opt-in, fixed-capacity `TimelineRecorder`
 with a steady default clock and injectable monotonic clocks. `BuildOwner`

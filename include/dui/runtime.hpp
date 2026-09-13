@@ -11,6 +11,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -106,6 +107,20 @@ private:
     std::string name;
     TypeToken type;
     std::any value;
+    std::function<std::string(const std::any&)> inspector;
+    std::optional<std::string> inspected_value;
+
+    void refresh_inspected_value() noexcept {
+      if (!inspector) {
+        inspected_value.reset();
+        return;
+      }
+      try {
+        inspected_value = inspector(value);
+      } catch (...) {
+        inspected_value.reset();
+      }
+    }
   };
 
   struct EnvironmentSlot final : DependencySource {
@@ -207,6 +222,13 @@ struct InspectorRenderSnapshot {
   friend bool operator==(const InspectorRenderSnapshot&, const InspectorRenderSnapshot&) = default;
 };
 
+struct InspectorStateSnapshot {
+  std::string name;
+  std::optional<std::string> value;
+
+  friend bool operator==(const InspectorStateSnapshot&, const InspectorStateSnapshot&) = default;
+};
+
 struct InspectorNode {
   Element::Id id{};
   std::uint64_t generation{};
@@ -225,6 +247,7 @@ struct InspectorNode {
   bool focused{};
   std::optional<InspectorRenderSnapshot> render_object;
   std::vector<InspectorNode> children;
+  std::vector<InspectorStateSnapshot> state_values;
 
   [[nodiscard]] const InspectorNode* find(Element::Id id) const;
 
@@ -401,6 +424,21 @@ public:
 
 private:
   struct PointerTapRoute;
+  struct StateFormattingScope {
+    explicit StateFormattingScope(BuildOwner& owner)
+      : owner_(owner), previous_(owner.formatting_state_) {
+      owner_.formatting_state_ = true;
+    }
+    ~StateFormattingScope() { owner_.formatting_state_ = previous_; }
+
+    StateFormattingScope(const StateFormattingScope&) = delete;
+    StateFormattingScope& operator=(const StateFormattingScope&) = delete;
+
+  private:
+    BuildOwner& owner_;
+    bool previous_;
+  };
+
   struct TimelineSpan {
     TimelineSpan() = default;
     TimelineSpan(BuildOwner& owner, std::shared_ptr<TimelineRecorder> recorder,
@@ -456,6 +494,8 @@ private:
 
   template <class T>
   [[nodiscard]] T& state(Element::Id id, std::uint64_t generation, std::uint64_t slot);
+  void refresh_state_inspection(Element::Id id, std::uint64_t generation,
+                                std::uint64_t slot) noexcept;
 
   std::unique_ptr<Element> root_;
   std::unordered_map<Element::Id, Element*> registry_;
@@ -472,6 +512,7 @@ private:
   std::shared_ptr<TimelineRecorder> timeline_recorder_;
   bool reconciling_{};
   bool framing_{};
+  bool formatting_state_{};
 };
 
 namespace detail {
@@ -600,6 +641,9 @@ public:
   template <fixed_string Name, class T>
   [[nodiscard]] StateHandle<std::decay_t<T>> state(T&& initial);
 
+  template <fixed_string Name, class T, class Formatter>
+  [[nodiscard]] StateHandle<std::decay_t<T>> state(T&& initial, Formatter&& formatter);
+
   template <class T> [[nodiscard]] const T& watch(Signal<T>& signal);
 
   template <class T> [[nodiscard]] const T& environment();
@@ -680,6 +724,9 @@ public:
 
   void set(T value) {
     BuildOwner& build_owner = owner();
+    if (build_owner.formatting_state_) {
+      throw std::logic_error("StateHandle cannot mutate state from an inspector formatter");
+    }
     T& current = build_owner.template state<T>(element_, generation_, slot_);
     if constexpr (std::equality_comparable<T>) {
       if (current == value) {
@@ -687,6 +734,7 @@ public:
       }
     }
     current = std::move(value);
+    build_owner.refresh_state_inspection(element_, generation_, slot_);
     build_owner.mark_dirty(element_, generation_);
   }
 
@@ -731,6 +779,9 @@ T& BuildOwner::state(Element::Id id, std::uint64_t generation, std::uint64_t slo
 template <fixed_string Name, class T>
 StateHandle<std::decay_t<T>> BuildContext::state(T&& initial) {
   using Value = std::decay_t<T>;
+  if (owner_->formatting_state_) {
+    throw std::logic_error("BuildContext cannot declare state from an inspector formatter");
+  }
   static_assert(std::copy_constructible<Value>,
                 "DUI state values must currently be copy constructible");
   constexpr auto slot = hash_name(Name.view());
@@ -744,13 +795,45 @@ StateHandle<std::decay_t<T>> BuildContext::state(T&& initial) {
   }
   if (iterator == element_->state_.end()) {
     auto value = std::make_any<Value>(std::forward<T>(initial));
-    iterator = element_->state_
-                 .emplace(slot, Element::StateSlot{std::string(Name.view()), type_token<Value>(),
-                                                   std::move(value)})
-                 .first;
+    iterator =
+      element_->state_
+        .emplace(slot,
+                 Element::StateSlot{
+                   std::string(Name.view()), type_token<Value>(), std::move(value), {}, {}})
+        .first;
+  }
+
+  {
+    BuildOwner::StateFormattingScope formatting{*owner_};
+    iterator->second.inspector = {};
+    iterator->second.inspected_value.reset();
   }
 
   return StateHandle<Value>{owner_->lifetime_, element_->id_, element_->generation_, slot};
+}
+
+template <fixed_string Name, class T, class Formatter>
+StateHandle<std::decay_t<T>> BuildContext::state(T&& initial, Formatter&& formatter) {
+  using Value = std::decay_t<T>;
+  using StateFormatter = std::decay_t<Formatter>;
+  static_assert(std::copy_constructible<StateFormatter>,
+                "DUI state inspector formatters must be copy constructible");
+  static_assert(std::invocable<const StateFormatter&, const Value&>,
+                "DUI state inspector formatters must accept const state references");
+  using Result = std::invoke_result_t<const StateFormatter&, const Value&>;
+  static_assert(std::constructible_from<std::string, Result>,
+                "DUI state inspector formatters must return string-constructible values");
+
+  auto handle = state<Name>(std::forward<T>(initial));
+  BuildOwner::StateFormattingScope formatting{*owner_};
+  constexpr auto slot = hash_name(Name.view());
+  auto& state_slot = element_->state_.at(slot);
+  state_slot.inspector =
+    [formatter = StateFormatter(std::forward<Formatter>(formatter))](const std::any& value) {
+      return std::string(std::invoke(formatter, std::any_cast<const Value&>(value)));
+    };
+  owner_->refresh_state_inspection(element_->id_, element_->generation_, slot);
+  return handle;
 }
 
 template <class T> const T& BuildContext::watch(Signal<T>& signal) {

@@ -271,7 +271,8 @@ struct KeepAliveStateItem {
   int* key_events;
 
   auto build(dui::BuildContext& context) const {
-    auto state = context.state<"keep-alive-value">(id * 10);
+    auto state = context.state<"keep-alive-value">(
+      id * 10, [](const int& value) { return std::to_string(value); });
     handles->at(static_cast<std::size_t>(id)) = state;
     auto& resource = context.resource<"keep-alive-resource">([&] {
       return KeepAliveResource{*resource_constructions, *resource_destructions};
@@ -1321,6 +1322,9 @@ void lazy_keep_alive_preserves_state_outside_the_cache_range() {
             inspected_list->children[0].state == dui::InspectorElementState::active &&
             inspected_list->children[1].key == "1" &&
             inspected_list->children[1].state == dui::InspectorElementState::dormant_keep_alive &&
+            inspected_list->children[1].state_values.size() == 1 &&
+            inspected_list->children[1].state_values[0] ==
+              dui::InspectorStateSnapshot{"keep-alive-value", std::string{"41"}} &&
             !inspected_list->children[1].children.empty() &&
             inspected_list->children[1].children.front().state ==
               dui::InspectorElementState::dormant_keep_alive,
@@ -1331,7 +1335,11 @@ void lazy_keep_alive_preserves_state_outside_the_cache_range() {
   require(owner.pending_build_count() == 1,
           "dormant keep-alive dependency did not receive invalidation");
   const auto dormant_update = owner.frame(dui::BoxConstraints::tight({100.0, 16.0}));
-  require(handles[1]->get() == 42 && !dormant_update.dump().contains("keep-alive 1"),
+  const auto updated_dormant_snapshot = owner.inspect();
+  require(handles[1]->get() == 42 && !dormant_update.dump().contains("keep-alive 1") &&
+            updated_dormant_snapshot.find(retained_id)->state_values.size() == 1 &&
+            updated_dormant_snapshot.find(retained_id)->state_values[0] ==
+              dui::InspectorStateSnapshot{"keep-alive-value", std::string{"42"}},
           "dormant state was discarded or painted while detached");
   require(owner.focused_node() != nullptr && owner.focused_node()->id() == focused_id &&
             owner.dispatch_key({"A", dui::KeyPhase::down}) == dui::KeyEventResult::handled &&

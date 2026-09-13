@@ -1278,7 +1278,7 @@ void reconcile_child(std::unique_ptr<Element>& slot, const V& view, BuildOwner& 
 template <class V> void BuildOwner::render(const V& view) {
   static_assert(View<V>, "BuildOwner::render requires a DUI View or Component");
   static_assert(detail::has_box_protocol<V>(), "BuildOwner root must use the box protocol");
-  if (reconciling_) {
+  if (reconciling_ || formatting_state_) {
     throw std::logic_error("BuildOwner does not allow reentrant render or flush");
   }
   reconciling_ = true;

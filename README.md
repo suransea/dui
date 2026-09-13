@@ -58,7 +58,9 @@ without flushing or framing the tree. It includes active and dormant Elements,
 identity and lifecycle metadata, safe state/dependency/resource counts, focus
 ownership, and RenderObject protocol/dirty/counter metadata. Snapshots support
 stable-ID lookup and canonical JSON serialization while retaining no framework
-or native pointers.
+or native pointers. State remains private unless declared with an explicit
+inspection formatter; opted-in values are cached as detached strings, refreshed
+on state updates, and can be revoked by returning to the ordinary state API.
 
 An optional fixed-capacity `TimelineRecorder` captures correlated UI and raster
 spans for reconciliation, frame production, layout stabilization, retained-layer
