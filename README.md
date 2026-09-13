@@ -68,7 +68,9 @@ clear the recorder across those threads. Detached snapshots serialize to
 versioned, canonical, locale-independent JSON without reducing nanosecond
 timestamps to floating point. Recorded `LayerTree` values carry a weak,
 non-owning provenance token so matching raster work shares a cross-lane flow ID
-without conflating UI frame IDs with raster ticket IDs.
+without conflating UI frame IDs with raster ticket IDs. Detached snapshots can
+also export Chrome/Perfetto Trace Event JSON with UI/raster tracks, complete
+spans, exact decimal microsecond timestamps, and visual cross-thread flow links.
 
 Implemented layout Views include `VStack`, `HStack`, `Stack`, `Padding`,
 `ColoredBox`, `Viewport`, and `SliverToBoxAdapter`; primitives include `Text`

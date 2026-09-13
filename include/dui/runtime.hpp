@@ -288,6 +288,7 @@ struct TimelineSnapshot {
   std::size_t dropped_event_count{};
 
   [[nodiscard]] std::string to_json() const;
+  [[nodiscard]] std::string to_chrome_trace_json() const;
 
   friend bool operator==(const TimelineSnapshot&, const TimelineSnapshot&) = default;
 };

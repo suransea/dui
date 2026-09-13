@@ -858,6 +858,12 @@ void timeline_json_is_canonical_and_strict() {
   const dui::TimelineSnapshot empty;
   require(empty.to_json() == "{\"version\":1,\"droppedEventCount\":0,\"events\":[]}",
           "empty timeline JSON was not canonical");
+  require(empty.to_chrome_trace_json() ==
+            "{\"traceEvents\":[{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":1,"
+            "\"args\":{\"name\":\"DUI UI\"}},{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,"
+            "\"tid\":2,\"args\":{\"name\":\"DUI Raster\"}}],\"displayTimeUnit\":\"ns\","
+            "\"duiDroppedEventCount\":0,\"duiTimeOriginNs\":\"0\"}",
+          "empty Chrome trace JSON was not deterministic or self-describing");
 
   dui::TimelineEvent root_event;
   root_event.sequence = 1;
@@ -931,11 +937,14 @@ void timeline_json_is_canonical_and_strict() {
     enumerated.events.push_back(value);
   }
   const std::string enumeration_json = enumerated.to_json();
+  const std::string enumeration_trace = enumerated.to_chrome_trace_json();
   std::size_t previous_position = 0;
   for (std::string_view name : names) {
     const std::size_t position = enumeration_json.find("\"phase\":\"" + std::string{name} + '"');
     require(position != std::string::npos && position >= previous_position,
             "timeline JSON omitted an enum spelling or reordered events");
+    require(enumeration_trace.contains("\"name\":\"" + std::string{name} + '"'),
+            "Chrome trace JSON omitted a UI phase spelling");
     previous_position = position;
   }
   require(enumeration_json.contains("\"outcome\":\"completed\"") &&
@@ -964,13 +973,18 @@ void timeline_json_is_canonical_and_strict() {
     raster_encoded.events.push_back(value);
   }
   const std::string raster_json = raster_encoded.to_json();
+  const std::string raster_trace = raster_encoded.to_chrome_trace_json();
   require(raster_json.starts_with("{\"version\":2") &&
-            raster_json.find("\"lane\":\"raster\"") != std::string::npos,
-          "raster timeline JSON did not select version 2 or encode its lane");
+            raster_json.find("\"lane\":\"raster\"") != std::string::npos &&
+            raster_trace.contains("\"cat\":\"dui.raster\"") &&
+            raster_trace.contains("\"tid\":2,\"args\""),
+          "raster timeline JSON did not select or encode its lane");
   for (std::size_t index = 0; index < raster_phase_names.size(); ++index) {
     require(
       raster_json.contains("\"phase\":\"" + std::string{raster_phase_names[index]} + '"') &&
-        raster_json.contains("\"outcome\":\"" + std::string{raster_outcome_names[index]} + '"'),
+        raster_json.contains("\"outcome\":\"" + std::string{raster_outcome_names[index]} + '"') &&
+        raster_trace.contains("\"name\":\"" + std::string{raster_phase_names[index]} + '"') &&
+        raster_trace.contains("\"outcome\":\"" + std::string{raster_outcome_names[index]} + '"'),
       "timeline JSON omitted a version-2 phase or outcome spelling");
   }
 
@@ -991,13 +1005,116 @@ void timeline_json_is_canonical_and_strict() {
             flowed_json.contains("\"frameId\":0,\"flowId\":0,\"lane\":"),
           "timeline JSON did not emit fixed version-3 flow fields for a mixed snapshot");
 
-  const auto rejects = [](dui::TimelineSnapshot malformed) {
+  dui::TimelineEvent trace_ui{1,
+                              2,
+                              0,
+                              3,
+                              dui::TimelineLane::ui,
+                              dui::TimelinePhase::frame,
+                              dui::TimelineOutcome::failed,
+                              std::chrono::nanoseconds{minimum_time + 1},
+                              std::chrono::nanoseconds{1001},
+                              4,
+                              5,
+                              maximum_id};
+  dui::TimelineEvent trace_nested = trace_ui;
+  trace_nested.sequence = 2;
+  trace_nested.span_id = 3;
+  trace_nested.parent_span_id = 2;
+  trace_nested.phase = dui::TimelinePhase::layout;
+  trace_nested.start = std::chrono::nanoseconds{minimum_time};
+  trace_nested.duration = std::chrono::nanoseconds::zero();
+  dui::TimelineEvent trace_raster = trace_ui;
+  trace_raster.sequence = 3;
+  trace_raster.span_id = 4;
+  trace_raster.frame_id = 9;
+  trace_raster.lane = dui::TimelineLane::raster;
+  trace_raster.phase = dui::TimelinePhase::raster_frame;
+  trace_raster.outcome = dui::TimelineOutcome::out_of_date;
+  constexpr auto maximum_trace_time = (std::uint64_t{1} << 50) - 1;
+  trace_raster.start =
+    std::chrono::nanoseconds{minimum_time + static_cast<NanosecondsRep>(maximum_trace_time)};
+  trace_raster.duration = std::chrono::nanoseconds{maximum_trace_time};
+  dui::TimelineEvent trace_zero = trace_nested;
+  trace_zero.sequence = 4;
+  trace_zero.span_id = 5;
+  trace_zero.parent_span_id = 0;
+  trace_zero.phase = dui::TimelinePhase::frame;
+  trace_zero.start = std::chrono::nanoseconds{minimum_time + 2};
+  trace_zero.flow_id = 0;
+  const dui::TimelineSnapshot trace_snapshot{{trace_ui, trace_nested, trace_raster, trace_zero}, 6};
+  const std::string trace_json = trace_snapshot.to_chrome_trace_json();
+  require(trace_json.contains(
+            "{\"name\":\"frame\",\"cat\":\"dui.ui\",\"ph\":\"X\",\"ts\":0.001,\"dur\":1.001,"
+            "\"pid\":1,\"tid\":1,\"args\":{\"outcome\":\"failed\",\"sequence\":\"1\","
+            "\"spanId\":\"2\",\"parentSpanId\":\"0\",\"frameId\":\"3\",\"pass\":4,"
+            "\"workCount\":5,\"flowId\":\"" +
+            std::to_string(maximum_id) + "\"}}") &&
+            trace_json.contains("\"ph\":\"s\",\"ts\":0.001,\"pid\":1,\"tid\":1,"
+                                "\"id\":\"0xffffffffffffffff\","
+                                "\"scope\":\"dui\",\"bp\":\"e\"") &&
+            trace_json.contains("\"name\":\"layout\",\"cat\":\"dui.ui\",\"ph\":\"X\",\"ts\":0,"
+                                "\"dur\":0") &&
+            trace_json.contains("\"name\":\"rasterFrame\",\"cat\":\"dui.raster\",\"ph\":\"X\","
+                                "\"ts\":1125899906842.623,\"dur\":1125899906842.623") &&
+            trace_json.contains("\"ph\":\"f\",\"ts\":1125899906842.623,\"pid\":1,\"tid\":2,") &&
+            trace_json.ends_with("\"displayTimeUnit\":\"ns\",\"duiDroppedEventCount\":6,"
+                                 "\"duiTimeOriginNs\":\"-9223372036854775808\"}"),
+          "Chrome trace JSON lost field order, precise integer time, flow, lane, or drop metadata");
+  const auto first_flow_marker = trace_json.find("\"cat\":\"dui.flow\"");
+  require(first_flow_marker != std::string::npos &&
+            trace_json.find("\"cat\":\"dui.flow\"", first_flow_marker + 1) != std::string::npos &&
+            trace_json.find("\"cat\":\"dui.flow\"",
+                            trace_json.find("\"cat\":\"dui.flow\"", first_flow_marker + 1) + 1) ==
+              std::string::npos,
+          "Chrome trace emitted flow markers for nested or zero-flow events");
+
+  std::string localized_trace;
+  try {
+    std::locale::global(std::locale{previous_locale, new GroupedNumberPunctuation});
+    localized_trace = trace_snapshot.to_chrome_trace_json();
+    std::locale::global(previous_locale);
+  } catch (...) {
+    std::locale::global(previous_locale);
+    throw;
+  }
+  require(localized_trace == trace_json && trace_snapshot.to_chrome_trace_json() == trace_json,
+          "Chrome trace JSON depended on locale or changed between serializations");
+
+  const auto trace_rejects = [](dui::TimelineSnapshot malformed) {
     try {
-      static_cast<void>(malformed.to_json());
+      static_cast<void>(malformed.to_chrome_trace_json());
     } catch (const std::invalid_argument&) {
       return true;
     }
     return false;
+  };
+  trace_raster.start =
+    std::chrono::nanoseconds{minimum_time + static_cast<NanosecondsRep>(maximum_trace_time + 1)};
+  trace_raster.duration = std::chrono::nanoseconds::zero();
+  require(trace_rejects({{trace_raster, trace_nested}, 0}),
+          "Chrome trace accepted an inexact relative timestamp range");
+  trace_raster.start = std::chrono::nanoseconds{maximum_duration};
+  require(trace_rejects({{trace_raster, trace_nested}, 0}),
+          "Chrome trace accepted an INT64-limit relative timestamp range");
+  trace_raster.start = trace_ui.start;
+  trace_raster.duration = std::chrono::nanoseconds{maximum_duration};
+  require(trace_rejects({{trace_raster}, 0}), "Chrome trace accepted an inexact duration range");
+
+  const auto rejects = [](dui::TimelineSnapshot malformed) {
+    bool rejected_native = false;
+    try {
+      static_cast<void>(malformed.to_json());
+    } catch (const std::invalid_argument&) {
+      rejected_native = true;
+    }
+    bool rejected_trace = false;
+    try {
+      static_cast<void>(malformed.to_chrome_trace_json());
+    } catch (const std::invalid_argument&) {
+      rejected_trace = true;
+    }
+    return rejected_native && rejected_trace;
   };
   dui::TimelineSnapshot malformed{{dui::TimelineEvent{}}, 0};
   malformed.events.front().lane = static_cast<dui::TimelineLane>(99);

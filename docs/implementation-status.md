@@ -319,8 +319,8 @@ technology observation remain target-OS work.
 ## M4: Tooling and Platforms
 
 Status: structured-inspector, concurrent UI/raster timeline collection,
-cross-lane flow correlation, and canonical timeline serialization slices
-implemented and verified.
+cross-lane flow correlation, canonical timeline serialization, and
+Chrome/Perfetto trace-export slices implemented and verified.
 
 `BuildOwner::inspect()` now captures an owned, passive Element-tree snapshot.
 Each node records stable identity/generation, depth, name/value/key, active or
@@ -363,7 +363,8 @@ inferring nesting from timestamps. Unknown enum values and negative durations
 are rejected. Tests cover empty and recorder-produced overflow snapshots, all
 enum names, signed time and integer limits, repeated byte identity, locale
 independence, vector-order preservation, and malformed values. A lossy
-Chrome/Perfetto trace adapter remains separate future work.
+Chrome/Perfetto mapping is provided separately so this storage schema remains
+stable.
 
 The raster-timeline slice makes recorder IDs, ring state, snapshots, clear, and
 injected-clock access safe across UI, raster, and observer threads. An optional
@@ -391,6 +392,21 @@ version-1/version-2 bytes unchanged and emits a fixed `flowId` field for every
 event in version 3. Tests cover matching and mismatched recorder paths, clean
 root reuse, standalone zero-flow operations, old-tree immutability, recorder
 lifetime, mixed-flow serialization, and concurrent propagation.
+
+`TimelineSnapshot::to_chrome_trace_json()` exports detached snapshots as Trace
+Event JSON without changing canonical DUI serialization. It creates named UI
+and raster tracks, maps retained spans to complete events in snapshot order,
+shifts starts to the earliest retained event, and preserves that signed origin
+as a decimal nanosecond string. Relative starts and durations become exact
+decimal microseconds without floating point and are bounded to `2^50 - 1`
+nanoseconds for safe trace-tool import. It reports dropped events and emits
+enclosing-slice `s`/`f` markers with Perfetto-compatible hexadecimal string IDs
+for nonzero UI-to-raster flows; identifier arguments are also strings to avoid
+browser truncation. Tests cover deterministic empty output, both tracks, every
+phase and outcome, fixed field order, unordered signed origins, sub-microsecond
+and exact boundary times, out-of-window rejection, dropped counts, marker
+placement, zero/nested marker omission, locale independence, repeated output,
+and malformed event rejection.
 
 ## Verification
 

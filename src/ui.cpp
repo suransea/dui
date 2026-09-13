@@ -1,6 +1,7 @@
 #include "dui/ui.hpp"
 
 #include <algorithm>
+#include <array>
 #include <locale>
 #include <mutex>
 #include <ranges>
@@ -858,6 +859,55 @@ std::string_view timeline_outcome_name(TimelineOutcome outcome) {
   throw std::invalid_argument("Timeline event has an unknown outcome");
 }
 
+void validate_timeline_event(const TimelineEvent& event) {
+  static_cast<void>(timeline_lane_name(event.lane));
+  static_cast<void>(timeline_phase_name(event.phase));
+  static_cast<void>(timeline_outcome_name(event.outcome));
+  if (event.duration < std::chrono::nanoseconds::zero()) {
+    throw std::invalid_argument("Timeline event duration cannot be negative");
+  }
+}
+
+constexpr std::uint64_t maximum_trace_nanoseconds = (std::uint64_t{1} << 50) - 1;
+
+std::uint64_t trace_relative_nanoseconds(std::chrono::nanoseconds value,
+                                         std::chrono::nanoseconds origin) {
+  const std::uint64_t relative =
+    static_cast<std::uint64_t>(value.count()) - static_cast<std::uint64_t>(origin.count());
+  if (relative > maximum_trace_nanoseconds) {
+    throw std::invalid_argument("Chrome trace relative timestamp exceeds the exact range");
+  }
+  return relative;
+}
+
+std::uint64_t trace_duration_nanoseconds(std::chrono::nanoseconds value) {
+  const std::uint64_t duration = static_cast<std::uint64_t>(value.count());
+  if (duration > maximum_trace_nanoseconds) {
+    throw std::invalid_argument("Chrome trace duration exceeds the exact range");
+  }
+  return duration;
+}
+
+void append_trace_microseconds(std::ostringstream& output, std::uint64_t nanoseconds) {
+  output << nanoseconds / 1000;
+  const std::uint64_t fraction = nanoseconds % 1000;
+  if (fraction != 0) {
+    output << '.' << static_cast<char>('0' + fraction / 100)
+           << static_cast<char>('0' + fraction / 10 % 10) << static_cast<char>('0' + fraction % 10);
+  }
+}
+
+void append_trace_flow_id(std::ostringstream& output, std::uint64_t flow_id) {
+  constexpr std::string_view hexadecimal = "0123456789abcdef";
+  std::array<char, 16> digits{};
+  std::size_t first = digits.size();
+  while (flow_id != 0) {
+    digits[--first] = hexadecimal[flow_id & 0xfu];
+    flow_id >>= 4u;
+  }
+  output << "0x" << std::string_view{digits.data() + first, digits.size() - first};
+}
+
 void append_json_node(std::ostringstream& output, const InspectorNode& node, std::size_t depth) {
   if (depth >= InspectorSnapshot::maximum_depth) {
     throw std::length_error("Inspector snapshot exceeds its maximum serialization depth");
@@ -966,12 +1016,7 @@ std::string InspectorSnapshot::to_json() const {
 std::string TimelineSnapshot::to_json() const {
   std::size_t version = 1;
   for (const TimelineEvent& event : events) {
-    static_cast<void>(timeline_lane_name(event.lane));
-    static_cast<void>(timeline_phase_name(event.phase));
-    static_cast<void>(timeline_outcome_name(event.outcome));
-    if (event.duration < std::chrono::nanoseconds::zero()) {
-      throw std::invalid_argument("Timeline event duration cannot be negative");
-    }
+    validate_timeline_event(event);
     if (event.lane == TimelineLane::raster || event.phase == TimelinePhase::raster_frame ||
         event.phase == TimelinePhase::surface_acquire || event.phase == TimelinePhase::rasterize ||
         event.phase == TimelinePhase::surface_present ||
@@ -1007,6 +1052,60 @@ std::string TimelineSnapshot::to_json() const {
            << ",\"pass\":" << event.pass << ",\"workCount\":" << event.work_count << '}';
   }
   output << "]}";
+  return std::move(output).str();
+}
+
+std::string TimelineSnapshot::to_chrome_trace_json() const {
+  std::chrono::nanoseconds origin{};
+  if (!events.empty()) {
+    origin = std::ranges::min(events, {}, &TimelineEvent::start).start;
+  }
+  for (const TimelineEvent& event : events) {
+    validate_timeline_event(event);
+    static_cast<void>(trace_relative_nanoseconds(event.start, origin));
+    static_cast<void>(trace_duration_nanoseconds(event.duration));
+  }
+
+  std::ostringstream output;
+  output.imbue(std::locale::classic());
+  output
+    << "{\"traceEvents\":["
+       "{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":1,\"args\":{\"name\":\"DUI UI\"}},"
+       "{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":2,\"args\":{\"name\":\"DUI "
+       "Raster\"}}";
+  for (const TimelineEvent& event : events) {
+    const std::string_view lane = timeline_lane_name(event.lane);
+    const std::string_view phase = timeline_phase_name(event.phase);
+    output << ",{\"name\":";
+    append_json_string(output, phase);
+    output << ",\"cat\":\"dui." << lane << "\",\"ph\":\"X\",\"ts\":";
+    append_trace_microseconds(output, trace_relative_nanoseconds(event.start, origin));
+    output << ",\"dur\":";
+    append_trace_microseconds(output, trace_duration_nanoseconds(event.duration));
+    output << ",\"pid\":1,\"tid\":" << (event.lane == TimelineLane::ui ? 1 : 2)
+           << ",\"args\":{\"outcome\":";
+    append_json_string(output, timeline_outcome_name(event.outcome));
+    output << ",\"sequence\":\"" << event.sequence << "\",\"spanId\":\"" << event.span_id
+           << "\",\"parentSpanId\":\"" << event.parent_span_id << "\",\"frameId\":\""
+           << event.frame_id << "\",\"pass\":" << event.pass
+           << ",\"workCount\":" << event.work_count << ",\"flowId\":\"" << event.flow_id << "\"}}";
+
+    const bool starts_flow = event.flow_id != 0 && event.parent_span_id == 0 &&
+                             event.lane == TimelineLane::ui && event.phase == TimelinePhase::frame;
+    const bool finishes_flow = event.flow_id != 0 && event.parent_span_id == 0 &&
+                               event.lane == TimelineLane::raster &&
+                               event.phase == TimelinePhase::raster_frame;
+    if (starts_flow || finishes_flow) {
+      output << ",{\"name\":\"uiToRaster\",\"cat\":\"dui.flow\",\"ph\":\""
+             << (starts_flow ? 's' : 'f') << "\",\"ts\":";
+      append_trace_microseconds(output, trace_relative_nanoseconds(event.start, origin));
+      output << ",\"pid\":1,\"tid\":" << (starts_flow ? 1 : 2) << ",\"id\":\"";
+      append_trace_flow_id(output, event.flow_id);
+      output << "\",\"scope\":\"dui\",\"bp\":\"e\"}";
+    }
+  }
+  output << "],\"displayTimeUnit\":\"ns\",\"duiDroppedEventCount\":" << dropped_event_count
+         << ",\"duiTimeOriginNs\":\"" << origin.count() << "\"}";
   return std::move(output).str();
 }
 

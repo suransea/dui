@@ -744,6 +744,45 @@ paths, unrecorded trees, all raster outcomes, clean-root reuse with fresh flows,
 old-tree immutability, recorder non-retention, standalone zero-flow events,
 mixed-flow version-3 field order, and concurrent propagation without torn IDs.
 
+The trace-export slice adds `TimelineSnapshot::to_chrome_trace_json()` as a
+tooling adapter without changing the canonical DUI schema. It emits a Chrome
+Trace Event JSON object with a `traceEvents` array, fixed process ID 1, UI thread
+ID 1, raster thread ID 2, and metadata naming both threads. Every retained span
+becomes a complete (`X`) event in snapshot order. Its phase name is the event
+name, its lane selects `dui.ui` or `dui.raster`, and its argument object carries
+the outcome, sequence/span/parent/frame identifiers, pass, work count, and flow
+ID. Identifier arguments are decimal strings so browser tooling cannot silently
+truncate them, while pass and work count remain numeric. The root also reports
+DUI's dropped-event count so truncation remains visible to tooling even though
+it is not a Trace Event concept.
+
+Trace Event timestamps are microseconds. The exporter shifts starts by the
+earliest retained start and reports that signed nanosecond origin separately as
+the decimal string `duiTimeOriginNs`. It writes non-negative relative starts and
+durations from integer nanoseconds as decimal microseconds with at most three
+fractional digits, without floating-point conversion or locale dependence. To
+remain safely round-trippable through the binary64 parsing used by trace tools,
+relative starts and durations may not exceed `2^50 - 1` nanoseconds; larger
+values are rejected instead of silently losing precision. The exporter does not
+reorder events, infer missing parents, or mutate the snapshot. Unknown enum
+representations and negative durations are rejected under the same rules as
+canonical serialization.
+
+For each nonzero-flow UI `frame` root, the exporter emits a flow-start (`s`)
+marker at that span's start. For each nonzero-flow raster `rasterFrame` root, it
+emits the matching flow-end (`f`) marker at that span's start. Flow IDs use
+Perfetto-compatible lowercase hexadecimal strings with a `0x` prefix and scope
+`dui`, avoiding JavaScript integer truncation; markers use enclosing-slice
+binding and are placed immediately after their corresponding complete event.
+Zero-flow and nested events produce no marker.
+The adapter intentionally performs no structural repair or deduplication for
+manually assembled snapshots. Acceptance covers empty output and metadata,
+both lanes and all enum spellings, exact signed origin formatting,
+sub-microsecond and maximum-window relative times, out-of-window rejection,
+fixed event/argument order, dropped counts, flow marker placement and hexadecimal
+string IDs, zero-flow omission, locale independence, repeatable bytes, and
+malformed-event rejection while canonical DUI JSON bytes remain unchanged.
+
 ## Prototype acceptance criteria
 
 M0 is accepted when headless tests demonstrate:
