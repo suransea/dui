@@ -76,6 +76,9 @@ also contribute semantics without requiring an explicit wrapper; image asset
 identifiers are never used as accessibility labels.
 `SemanticsDiffer` flattens successive snapshots into deterministic add, update,
 move, and child-first removal records for future native accessibility adapters.
+`AccessibilityBridge` delivers those records through a platform-neutral adapter
+contract and acknowledges snapshots only after successful delivery, allowing
+failed native updates to retry without losing state.
 
 ## Build
 

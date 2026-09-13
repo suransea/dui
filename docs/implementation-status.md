@@ -269,6 +269,18 @@ replacing the previous snapshot. Tests cover property/action changes, sibling
 reorder, moves into new parents, subtree ordering, malformed inputs, clear, and
 BuildOwner-produced snapshots. Native API calls remain outside this layer.
 
+The adapter-delivery slice adds caller-owned `AccessibilityAdapter` and
+`AccessibilityBridge` contracts. Bridge publication diffs against the last
+acknowledged snapshot, suppresses no-op adapter calls, and commits state only
+after successful delivery. Adapter exceptions preserve the prior snapshot so
+publish and clear retry the same complete delta. Callback-scoped change spans
+must not be retained, and reentrant publish or clear on the delivering bridge is
+rejected before diffing. Tests cover successful acknowledgment, identical retry
+records after failed publish/clear, no-op suppression, reentrancy, malformed
+trees, callback-driven bridge destruction on success and failure, and BuildOwner
+snapshots. Bridges are noncopyable, nonmovable, and UI-thread confined. Native
+UIA, AppKit, AT-SPI, and mobile implementations remain pending.
+
 ## Verification
 
 The prototype has been built and tested with:

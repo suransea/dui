@@ -1439,6 +1439,60 @@ SemanticsUpdate SemanticsDiffer::clear() {
   return SemanticsUpdate{std::move(changes)};
 }
 
+AccessibilityBridge::AccessibilityBridge() : delivery_state_(std::make_shared<DeliveryState>()) {}
+
+AccessibilityBridge::~AccessibilityBridge() { delivery_state_->alive = false; }
+
+bool AccessibilityBridge::publish(const SemanticsTree& tree, AccessibilityAdapter& adapter) {
+  const std::shared_ptr<DeliveryState> delivery = delivery_state_;
+  if (delivery->delivering) {
+    throw std::logic_error("AccessibilityBridge delivery is not reentrant");
+  }
+  SemanticsDiffer next = differ_;
+  SemanticsUpdate update = next.update(tree);
+  if (update.empty()) {
+    return false;
+  }
+  delivery->delivering = true;
+  try {
+    adapter.apply(update.changes);
+  } catch (...) {
+    delivery->delivering = false;
+    throw;
+  }
+  delivery->delivering = false;
+  if (!delivery->alive) {
+    return true;
+  }
+  differ_.swap(next);
+  return true;
+}
+
+bool AccessibilityBridge::clear(AccessibilityAdapter& adapter) {
+  const std::shared_ptr<DeliveryState> delivery = delivery_state_;
+  if (delivery->delivering) {
+    throw std::logic_error("AccessibilityBridge delivery is not reentrant");
+  }
+  SemanticsDiffer next = differ_;
+  SemanticsUpdate update = next.clear();
+  if (update.empty()) {
+    return false;
+  }
+  delivery->delivering = true;
+  try {
+    adapter.apply(update.changes);
+  } catch (...) {
+    delivery->delivering = false;
+    throw;
+  }
+  delivery->delivering = false;
+  if (!delivery->alive) {
+    return true;
+  }
+  differ_.swap(next);
+  return true;
+}
+
 SemanticsTree RenderOwner::semantics_tree() const {
   if (!has_completed_frame_ || !dirty_layout_.empty()) {
     throw std::logic_error("semantics_tree requires completed current layout");

@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -32,6 +33,40 @@ dui::SemanticsNode node(std::uint64_t id, std::string label,
           {},
           std::move(children)};
 }
+
+struct RecordingAccessibilityAdapter final : dui::AccessibilityAdapter {
+  std::vector<dui::SemanticsUpdate> deliveries;
+  bool fail_next{};
+  dui::AccessibilityBridge* reentrant_bridge{};
+  const dui::SemanticsTree* reentrant_tree{};
+  bool publish_rejected{};
+  bool clear_rejected{};
+  std::function<void()> on_apply;
+
+  void apply(std::span<const dui::SemanticsChange> changes) override {
+    deliveries.push_back({std::vector<dui::SemanticsChange>{changes.begin(), changes.end()}});
+    if (on_apply) {
+      auto callback = on_apply;
+      callback();
+    }
+    if (reentrant_bridge != nullptr && reentrant_tree != nullptr) {
+      try {
+        static_cast<void>(reentrant_bridge->publish(*reentrant_tree, *this));
+      } catch (const std::logic_error&) {
+        publish_rejected = true;
+      }
+      try {
+        static_cast<void>(reentrant_bridge->clear(*this));
+      } catch (const std::logic_error&) {
+        clear_rejected = true;
+      }
+    }
+    if (fail_next) {
+      fail_next = false;
+      throw std::runtime_error("accessibility delivery failed");
+    }
+  }
+};
 
 void semantics_tree_preserves_hierarchy_identity_and_actions() {
   dui::BuildOwner owner;
@@ -415,6 +450,127 @@ void semantics_differ_emits_deterministic_transactional_updates() {
           "callback replacement with unchanged actions emitted a semantics update");
 }
 
+void accessibility_bridge_acknowledges_successful_delivery() {
+  dui::AccessibilityBridge bridge;
+  RecordingAccessibilityAdapter adapter;
+  const dui::SemanticsTree first{{node(20, "first", {node(21, "child")})}};
+  require(bridge.publish(first, adapter) && adapter.deliveries.size() == 1 &&
+            adapter.deliveries.front().changes.size() == 2 && bridge.entries().size() == 2,
+          "AccessibilityBridge did not publish and acknowledge its first snapshot");
+  require(!bridge.publish(first, adapter) && adapter.deliveries.size() == 1,
+          "AccessibilityBridge delivered an equivalent snapshot");
+
+  const std::size_t deliveries_before_invalid = adapter.deliveries.size();
+  bool invalid_rejected = false;
+  try {
+    static_cast<void>(bridge.publish({{node(22, "first"), node(22, "duplicate")}}, adapter));
+  } catch (const std::logic_error&) {
+    invalid_rejected = true;
+  }
+  require(invalid_rejected && adapter.deliveries.size() == deliveries_before_invalid &&
+            bridge.entries().front().label == "first",
+          "malformed bridge publication called the adapter or changed acknowledgment");
+
+  const dui::SemanticsTree second{{node(20, "updated", {node(21, "child")})}};
+  bool adapter_saw_acknowledged_snapshot = false;
+  adapter.on_apply = [&] {
+    adapter_saw_acknowledged_snapshot =
+      bridge.entries().size() == 2 && bridge.entries().front().label == "first";
+  };
+  adapter.fail_next = true;
+  bool publish_failed = false;
+  try {
+    static_cast<void>(bridge.publish(second, adapter));
+  } catch (const std::runtime_error&) {
+    publish_failed = true;
+  }
+  adapter.on_apply = {};
+  require(publish_failed && adapter_saw_acknowledged_snapshot && bridge.entries().size() == 2 &&
+            bridge.entries().front().label == "first",
+          "failed accessibility delivery advanced the acknowledged snapshot");
+  const auto failed_publish = adapter.deliveries.back();
+  require(bridge.publish(second, adapter) && adapter.deliveries.back() == failed_publish &&
+            bridge.entries().front().label == "updated",
+          "accessibility delivery retry did not reproduce and acknowledge the same delta");
+
+  adapter.fail_next = true;
+  bool clear_failed = false;
+  try {
+    static_cast<void>(bridge.clear(adapter));
+  } catch (const std::runtime_error&) {
+    clear_failed = true;
+  }
+  require(clear_failed && bridge.entries().size() == 2,
+          "failed accessibility clear discarded the acknowledged snapshot");
+  const auto failed_clear = adapter.deliveries.back();
+  require(bridge.clear(adapter) && adapter.deliveries.back() == failed_clear &&
+            bridge.entries().empty() && !bridge.clear(adapter),
+          "accessibility clear retry was not deterministic or did not acknowledge removal");
+
+  adapter.reentrant_bridge = &bridge;
+  adapter.reentrant_tree = &first;
+  require(bridge.publish(first, adapter) && adapter.publish_rejected && adapter.clear_rejected &&
+            bridge.entries().size() == 2,
+          "AccessibilityBridge accepted reentrant publish or clear during delivery");
+  adapter.reentrant_bridge = nullptr;
+  adapter.reentrant_tree = nullptr;
+
+  dui::BuildOwner owner;
+  owner.render(dui::Text{"generated bridge"});
+  [[maybe_unused]] const auto frame = owner.frame(dui::BoxConstraints::tight({200.0, 16.0}));
+  dui::AccessibilityBridge generated_bridge;
+  RecordingAccessibilityAdapter generated_adapter;
+  require(generated_bridge.publish(owner.semantics_tree(), generated_adapter) &&
+            generated_bridge.entries().size() == 1 &&
+            generated_bridge.entries().front().label == "generated bridge",
+          "AccessibilityBridge rejected a BuildOwner snapshot");
+
+  auto destroyed_publish_bridge = std::make_unique<dui::AccessibilityBridge>();
+  RecordingAccessibilityAdapter destroyed_publish_adapter;
+  destroyed_publish_adapter.on_apply = [&] { destroyed_publish_bridge.reset(); };
+  const bool destroyed_publish_delivered =
+    destroyed_publish_bridge->publish(first, destroyed_publish_adapter);
+  require(destroyed_publish_delivered && destroyed_publish_bridge == nullptr,
+          "adapter could not destroy its bridge during successful publish");
+
+  auto destroyed_clear_bridge = std::make_unique<dui::AccessibilityBridge>();
+  RecordingAccessibilityAdapter destroyed_clear_adapter;
+  require(destroyed_clear_bridge->publish(first, destroyed_clear_adapter),
+          "bridge destruction clear test could not publish its initial tree");
+  destroyed_clear_adapter.on_apply = [&] { destroyed_clear_bridge.reset(); };
+  const bool destroyed_clear_delivered = destroyed_clear_bridge->clear(destroyed_clear_adapter);
+  require(destroyed_clear_delivered && destroyed_clear_bridge == nullptr,
+          "adapter could not destroy its bridge during successful clear");
+
+  auto destroyed_failure_bridge = std::make_unique<dui::AccessibilityBridge>();
+  RecordingAccessibilityAdapter destroyed_failure_adapter;
+  destroyed_failure_adapter.on_apply = [&] { destroyed_failure_bridge.reset(); };
+  destroyed_failure_adapter.fail_next = true;
+  bool destroyed_failure_propagated = false;
+  try {
+    static_cast<void>(destroyed_failure_bridge->publish(first, destroyed_failure_adapter));
+  } catch (const std::runtime_error&) {
+    destroyed_failure_propagated = true;
+  }
+  require(destroyed_failure_propagated && destroyed_failure_bridge == nullptr,
+          "bridge destruction during failed delivery caused unsafe exception handling");
+
+  auto destroyed_clear_failure_bridge = std::make_unique<dui::AccessibilityBridge>();
+  RecordingAccessibilityAdapter destroyed_clear_failure_adapter;
+  require(destroyed_clear_failure_bridge->publish(first, destroyed_clear_failure_adapter),
+          "failed-clear destruction test could not publish its initial tree");
+  destroyed_clear_failure_adapter.on_apply = [&] { destroyed_clear_failure_bridge.reset(); };
+  destroyed_clear_failure_adapter.fail_next = true;
+  bool destroyed_clear_failure_propagated = false;
+  try {
+    static_cast<void>(destroyed_clear_failure_bridge->clear(destroyed_clear_failure_adapter));
+  } catch (const std::runtime_error&) {
+    destroyed_clear_failure_propagated = true;
+  }
+  require(destroyed_clear_failure_propagated && destroyed_clear_failure_bridge == nullptr,
+          "bridge destruction during failed clear caused unsafe exception handling");
+}
+
 } // namespace
 
 int main() {
@@ -424,6 +580,7 @@ int main() {
     semantics_tree_clips_lazy_visible_children();
     render_owner_rejects_semantics_without_current_layout();
     semantics_differ_emits_deterministic_transactional_updates();
+    accessibility_bridge_acknowledges_successful_delivery();
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';
     return EXIT_FAILURE;

@@ -238,23 +238,61 @@ enum class SemanticsChangeKind { added, updated, removed };
 struct SemanticsChange {
   SemanticsChangeKind kind{};
   SemanticsEntry entry;
+
+  friend bool operator==(const SemanticsChange&, const SemanticsChange&) = default;
 };
 
 struct SemanticsUpdate {
   std::vector<SemanticsChange> changes;
 
   [[nodiscard]] bool empty() const { return changes.empty(); }
+
+  friend bool operator==(const SemanticsUpdate&, const SemanticsUpdate&) = default;
 };
 
 class SemanticsDiffer {
 public:
   [[nodiscard]] SemanticsUpdate update(const SemanticsTree& tree);
   [[nodiscard]] SemanticsUpdate clear();
+  void swap(SemanticsDiffer& other) noexcept { entries_.swap(other.entries_); }
   // Invalidated by a non-empty update or clear.
   [[nodiscard]] std::span<const SemanticsEntry> entries() const { return entries_; }
 
 private:
   std::vector<SemanticsEntry> entries_;
+};
+
+class AccessibilityAdapter {
+public:
+  virtual ~AccessibilityAdapter() = default;
+
+  // The change span is valid only for the duration of this call.
+  virtual void apply(std::span<const SemanticsChange> changes) = 0;
+};
+
+class AccessibilityBridge {
+public:
+  AccessibilityBridge();
+  ~AccessibilityBridge();
+
+  AccessibilityBridge(const AccessibilityBridge&) = delete;
+  AccessibilityBridge& operator=(const AccessibilityBridge&) = delete;
+  AccessibilityBridge(AccessibilityBridge&&) = delete;
+  AccessibilityBridge& operator=(AccessibilityBridge&&) = delete;
+
+  [[nodiscard]] bool publish(const SemanticsTree& tree, AccessibilityAdapter& adapter);
+  [[nodiscard]] bool clear(AccessibilityAdapter& adapter);
+  // Invalidated by a successful non-empty publish or clear.
+  [[nodiscard]] std::span<const SemanticsEntry> entries() const { return differ_.entries(); }
+
+private:
+  struct DeliveryState {
+    bool alive{true};
+    bool delivering{};
+  };
+
+  SemanticsDiffer differ_;
+  std::shared_ptr<DeliveryState> delivery_state_;
 };
 
 struct HitTestEntry {

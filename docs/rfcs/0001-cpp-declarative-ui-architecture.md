@@ -258,6 +258,28 @@ Acceptance covers first publication, property/action changes, sibling reorder,
 reparenting into a new parent, subtree add/remove ordering, no-op snapshots,
 clear, malformed-tree transactionality, and snapshots produced by BuildOwner.
 
+The adapter-delivery slice adds caller-owned `AccessibilityAdapter` and stateful
+`AccessibilityBridge` contracts without selecting a native API. `publish(tree,
+adapter)` computes changes against a copy of the acknowledged snapshot, skips
+the adapter for a no-op, and commits the new snapshot only after `apply()`
+returns successfully. `clear(adapter)` follows the same rule for child-first
+removals. If an adapter throws, the exception returns to the host boundary and
+the bridge retains its previous acknowledged snapshot so the same complete
+delta can be retried. The change span passed to `apply()` is callback-scoped and
+must not be retained. The adapter and input tree remain caller-owned; the bridge
+stores no RenderObject, BuildOwner, callback, or native provider pointer.
+Publishing or clearing the same bridge from inside its adapter callback is
+rejected before diffing, preventing nested acknowledgment races. A bridge is
+noncopyable, nonmovable, and UI-thread confined. Adapter code may destroy the
+delivering bridge; a method-local lifetime token completes success or exception
+handling without accessing the destroyed object. Action routing
+continues through `BuildOwner::perform_semantics_action`; native event-procedure
+exception translation remains the platform adapter's responsibility.
+Acceptance covers first delivery, no-op suppression, property delivery,
+failed-delivery retry with identical changes, failed and successful clear,
+reentrant publish/clear rejection, callback-driven bridge destruction, malformed
+tree rejection before adapter invocation, and BuildOwner snapshot delivery.
+
 A platform text-input adapter connects a real host window to an operating
 system text service; a synthetic or terminal-only backend does not satisfy this
 requirement. One conditionally built desktop implementation is sufficient for
