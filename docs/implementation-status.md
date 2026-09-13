@@ -318,8 +318,8 @@ technology observation remain target-OS work.
 
 ## M4: Tooling and Platforms
 
-Status: structured-inspector and initial UI timeline slices implemented and
-verified.
+Status: structured-inspector, UI timeline collection, and canonical timeline
+serialization slices implemented and verified.
 
 `BuildOwner::inspect()` now captures an owned, passive Element-tree snapshot.
 Each node records stable identity/generation, depth, name/value/key, active or
@@ -335,9 +335,8 @@ malformed bytes become deterministic `U+FFFD` escapes, and capture/serialization
 enforce a 512-node depth bound while lookup remains iterative. Existing
 `dump_tree()` output remains compatible. Tests cover empty, dirty, framed,
 keyed, focused, escaped/malformed UTF-8, bounded deep, deterministic, owner-
-independent, reentrancy-rejected, and dormant Sliver snapshots. Timeline
-serialization, live transport, opt-in value inspection, and GUI tooling remain
-pending.
+independent, reentrancy-rejected, and dormant Sliver snapshots. Timeline live
+transport, opt-in value inspection, and GUI tooling remain pending.
 
 The initial timeline slice adds an opt-in, fixed-capacity `TimelineRecorder`
 with a steady default clock and injectable monotonic clocks. `BuildOwner`
@@ -353,8 +352,17 @@ destruction. Tests use fake clocks to cover exact timing and nesting, disabled
 clock reads, dirty and clean work counts, failure recovery, bounded overflow,
 clear without ID reuse, and all successful sixteen-pass and rejected
 seventeen-pass lazy stabilization phases. Raster-thread events, cross-thread
-observation, serialization, live transport, and timeline GUI tooling remain
-pending.
+observation, live transport, and timeline GUI tooling remain pending.
+
+`TimelineSnapshot::to_json()` now emits versioned canonical DUI JSON with fixed
+root and event field order, classic-locale base-10 integers, nanosecond timing,
+stable enum spellings, and no insignificant whitespace. It preserves the
+snapshot's event order and explicit parent/frame relationships rather than
+inferring nesting from timestamps. Unknown enum values and negative durations
+are rejected. Tests cover empty and recorder-produced overflow snapshots, all
+enum names, signed time and integer limits, repeated byte identity, locale
+independence, vector-order preservation, and malformed values. A lossy
+Chrome/Perfetto trace adapter remains separate future work.
 
 ## Verification
 

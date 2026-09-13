@@ -64,7 +64,9 @@ An optional fixed-capacity `TimelineRecorder` captures correlated UI-thread
 spans for reconciliation, dirty builds, frame production, render-tree sync,
 layout stabilization, lazy realization, and retained-layer composition.
 Callers can inject a monotonic clock for deterministic profiling and retain
-detached snapshots without exposing framework pointers.
+detached snapshots without exposing framework pointers. Timeline snapshots
+serialize to versioned, canonical, locale-independent JSON without reducing
+nanosecond timestamps to floating point.
 
 Implemented layout Views include `VStack`, `HStack`, `Stack`, `Padding`,
 `ColoredBox`, `Viewport`, and `SliverToBoxAdapter`; primitives include `Text`

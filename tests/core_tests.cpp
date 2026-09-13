@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <limits>
+#include <locale>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -820,6 +822,10 @@ void timeline_recorder_is_deterministic_bounded_and_failure_safe() {
   require(overflow.events.size() == 2 && overflow.events[0].sequence == 2 &&
             overflow.events[1].sequence == 3 && overflow.dropped_event_count == 1,
           "timeline ring did not retain the newest completed events");
+  const std::string overflow_json = overflow.to_json();
+  require(overflow_json.contains("\"droppedEventCount\":1") &&
+            overflow_json.find("\"sequence\":2") < overflow_json.find("\"sequence\":3"),
+          "timeline JSON omitted overflow metadata or retained event order");
   bounded->clear();
   bounded_owner.render(dui::Text{"four"});
   overflow = bounded->snapshot();
@@ -833,6 +839,123 @@ void timeline_recorder_is_deterministic_bounded_and_failure_safe() {
             overflow.events[1].phase == dui::TimelinePhase::composite &&
             overflow.dropped_event_count == 3,
           "timeline ring did not evict nested spans by completion before start-order sorting");
+}
+
+class GroupedNumberPunctuation final : public std::numpunct<char> {
+private:
+  char do_thousands_sep() const override { return '_'; }
+  std::string do_grouping() const override { return "\3"; }
+};
+
+void timeline_json_is_canonical_and_strict() {
+  const dui::TimelineSnapshot empty;
+  require(empty.to_json() == "{\"version\":1,\"droppedEventCount\":0,\"events\":[]}",
+          "empty timeline JSON was not canonical");
+
+  dui::TimelineEvent root_event;
+  root_event.sequence = 1;
+  root_event.span_id = 1;
+  root_event.start = std::chrono::nanoseconds{-1};
+  const dui::TimelineSnapshot root_snapshot{{root_event}, 0};
+  require(root_snapshot.to_json() ==
+            "{\"version\":1,\"droppedEventCount\":0,\"events\":[{\"sequence\":1,\"spanId\":"
+            "1,\"parentSpanId\":0,\"frameId\":0,\"lane\":\"ui\",\"phase\":\"reconcile\","
+            "\"outcome\":\"completed\",\"startNs\":-1,\"durationNs\":0,\"pass\":0,"
+            "\"workCount\":0}]}",
+          "timeline JSON changed its root parent/frame sentinels or signed time encoding");
+
+  using NanosecondsRep = std::chrono::nanoseconds::rep;
+  const auto maximum_id = std::numeric_limits<std::uint64_t>::max();
+  const auto maximum_size = std::numeric_limits<std::size_t>::max();
+  const auto minimum_time = std::numeric_limits<NanosecondsRep>::min();
+  const auto maximum_duration = std::numeric_limits<NanosecondsRep>::max();
+  const dui::TimelineEvent event{maximum_id,
+                                 maximum_id - 1,
+                                 maximum_id - 2,
+                                 maximum_id - 3,
+                                 dui::TimelineLane::ui,
+                                 dui::TimelinePhase::lazy_realization,
+                                 dui::TimelineOutcome::failed,
+                                 std::chrono::nanoseconds{minimum_time},
+                                 std::chrono::nanoseconds{maximum_duration},
+                                 maximum_size,
+                                 maximum_size - 1};
+  const dui::TimelineSnapshot encoded{{event}, maximum_size};
+  const std::string expected =
+    "{\"version\":1,\"droppedEventCount\":" + std::to_string(maximum_size) +
+    ",\"events\":[{\"sequence\":" + std::to_string(maximum_id) +
+    ",\"spanId\":" + std::to_string(maximum_id - 1) +
+    ",\"parentSpanId\":" + std::to_string(maximum_id - 2) +
+    ",\"frameId\":" + std::to_string(maximum_id - 3) +
+    ",\"lane\":\"ui\",\"phase\":\"lazyRealization\",\"outcome\":\"failed\",\"startNs\":" +
+    std::to_string(minimum_time) + ",\"durationNs\":" + std::to_string(maximum_duration) +
+    ",\"pass\":" + std::to_string(maximum_size) +
+    ",\"workCount\":" + std::to_string(maximum_size - 1) + "}]}";
+  require(encoded.to_json() == expected && encoded.to_json() == expected,
+          "timeline JSON lost integer limits, field order, or byte determinism");
+
+  const std::locale previous_locale = std::locale();
+  std::string localized;
+  try {
+    std::locale::global(std::locale{previous_locale, new GroupedNumberPunctuation});
+    localized = encoded.to_json();
+    std::locale::global(previous_locale);
+  } catch (...) {
+    std::locale::global(previous_locale);
+    throw;
+  }
+  require(localized == expected, "timeline JSON depended on the process numeric locale");
+
+  const std::array phases{
+    dui::TimelinePhase::reconcile, dui::TimelinePhase::build,
+    dui::TimelinePhase::frame,     dui::TimelinePhase::synchronize_render_tree,
+    dui::TimelinePhase::layout,    dui::TimelinePhase::lazy_realization,
+    dui::TimelinePhase::composite};
+  const std::array<std::string_view, 7> names{
+    "reconcile", "build",           "frame",    "synchronizeRenderTree",
+    "layout",    "lazyRealization", "composite"};
+  dui::TimelineSnapshot enumerated;
+  for (std::size_t index = 0; index < phases.size(); ++index) {
+    dui::TimelineEvent value;
+    value.sequence = phases.size() - index;
+    value.span_id = index + 1;
+    value.phase = phases[index];
+    value.outcome = index == 0 ? dui::TimelineOutcome::completed : dui::TimelineOutcome::failed;
+    enumerated.events.push_back(value);
+  }
+  const std::string enumeration_json = enumerated.to_json();
+  std::size_t previous_position = 0;
+  for (std::string_view name : names) {
+    const std::size_t position = enumeration_json.find("\"phase\":\"" + std::string{name} + '"');
+    require(position != std::string::npos && position >= previous_position,
+            "timeline JSON omitted an enum spelling or reordered events");
+    previous_position = position;
+  }
+  require(enumeration_json.contains("\"outcome\":\"completed\"") &&
+            enumeration_json.contains("\"outcome\":\"failed\"") &&
+            enumeration_json.find("\"sequence\":7") < enumeration_json.find("\"sequence\":1"),
+          "timeline JSON omitted outcomes or sorted the public event vector");
+
+  const auto rejects = [](dui::TimelineSnapshot malformed) {
+    try {
+      static_cast<void>(malformed.to_json());
+    } catch (const std::invalid_argument&) {
+      return true;
+    }
+    return false;
+  };
+  dui::TimelineSnapshot malformed{{dui::TimelineEvent{}}, 0};
+  malformed.events.front().lane = static_cast<dui::TimelineLane>(99);
+  require(rejects(malformed), "timeline JSON accepted an unknown lane");
+  malformed.events.front().lane = dui::TimelineLane::ui;
+  malformed.events.front().phase = static_cast<dui::TimelinePhase>(99);
+  require(rejects(malformed), "timeline JSON accepted an unknown phase");
+  malformed.events.front().phase = dui::TimelinePhase::frame;
+  malformed.events.front().outcome = static_cast<dui::TimelineOutcome>(99);
+  require(rejects(malformed), "timeline JSON accepted an unknown outcome");
+  malformed.events.front().outcome = dui::TimelineOutcome::completed;
+  malformed.events.front().duration = std::chrono::nanoseconds{-1};
+  require(rejects(malformed), "timeline JSON accepted a negative duration");
 }
 
 void duplicate_keys_are_rejected() {
@@ -875,6 +998,7 @@ int main() {
     tree_dump_is_deterministic();
     structured_inspector_is_detached_and_deterministic();
     timeline_recorder_is_deterministic_bounded_and_failure_safe();
+    timeline_json_is_canonical_and_strict();
     duplicate_keys_are_rejected();
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';

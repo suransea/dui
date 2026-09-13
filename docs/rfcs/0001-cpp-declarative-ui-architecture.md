@@ -643,8 +643,9 @@ returns detached values; `clear()` removes retained events and resets the drop
 count without reusing sequence, span, or frame IDs. Recorder attachment changes
 are rejected during reconciliation or framing so one operation cannot split
 across recorders. Recorder mutation and owner instrumentation are UI-thread
-confined in this slice; raster-lane collection, cross-thread snapshotting, trace
-serialization, live transport, and a GUI frontend remain later work.
+confined in this slice; raster-lane collection, cross-thread snapshotting, live
+transport, and a GUI frontend remain later work. Canonical serialization begins
+in the following slice.
 
 Timeline acceptance covers deterministic fake-clock timing and nesting, dirty
 work counts, successful and failed reconciliation/frame closure, recovery after
@@ -652,6 +653,32 @@ failure, retained clean frames, exact lazy stabilization pass ordering, bounded
 overflow and clear behavior, detached lifetime, reentrant attachment rejection,
 and a disabled path that performs no clock reads. Existing output, identity,
 queue, and exception behavior must remain unchanged with recording enabled.
+
+The timeline-serialization slice adds `TimelineSnapshot::to_json()` as DUI's
+versioned canonical storage and transport seed. Version 1 emits exactly
+`version`, `droppedEventCount`, and `events` at the root. Each event emits, in
+fixed order, `sequence`, `spanId`, `parentSpanId`, `frameId`, `lane`, `phase`,
+`outcome`, `startNs`, `durationNs`, `pass`, and `workCount`. Integer values use
+base-10 JSON numbers without exponent notation, time remains signed integer
+nanoseconds, zero remains the absent parent/frame sentinel, and serialization
+uses the classic locale with no insignificant whitespace or trailing newline.
+Event vector order is preserved rather than inferred from timestamps or sorted
+again. Version 1 enum spellings are `ui`; `reconcile`, `build`, `frame`,
+`synchronizeRenderTree`, `layout`, `lazyRealization`, and `composite`; and
+`completed` or `failed`. Unknown enum representations and negative durations
+throw `invalid_argument` without mutating the snapshot.
+
+This native JSON is intentionally not RFC 8785/JCS or Chrome Trace Event JSON.
+It preserves the complete current model without converting nanoseconds to
+floating-point microseconds, inventing process/thread IDs, or moving DUI fields
+into tool-specific argument bags. Consumers that parse JSON numbers through
+IEEE-754 must use a lossless integer path for IDs and counters above 2^53. A
+later Chrome/Perfetto exporter may perform an explicit lossy mapping without
+changing this schema. Acceptance covers empty snapshots, every enum spelling,
+all fields and fixed ordering, zero and correlated IDs, signed time and integer
+limits, nonzero drop counts, vector-order preservation, repeated byte identity,
+locale independence, recorder-produced overflow snapshots, and malformed enum
+or negative-duration rejection.
 
 ## Prototype acceptance criteria
 

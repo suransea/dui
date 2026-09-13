@@ -746,6 +746,44 @@ std::string_view inspector_protocol_name(InspectorRenderProtocol protocol) {
   return "object";
 }
 
+std::string_view timeline_lane_name(TimelineLane lane) {
+  switch (lane) {
+  case TimelineLane::ui:
+    return "ui";
+  }
+  throw std::invalid_argument("Timeline event has an unknown lane");
+}
+
+std::string_view timeline_phase_name(TimelinePhase phase) {
+  switch (phase) {
+  case TimelinePhase::reconcile:
+    return "reconcile";
+  case TimelinePhase::build:
+    return "build";
+  case TimelinePhase::frame:
+    return "frame";
+  case TimelinePhase::synchronize_render_tree:
+    return "synchronizeRenderTree";
+  case TimelinePhase::layout:
+    return "layout";
+  case TimelinePhase::lazy_realization:
+    return "lazyRealization";
+  case TimelinePhase::composite:
+    return "composite";
+  }
+  throw std::invalid_argument("Timeline event has an unknown phase");
+}
+
+std::string_view timeline_outcome_name(TimelineOutcome outcome) {
+  switch (outcome) {
+  case TimelineOutcome::completed:
+    return "completed";
+  case TimelineOutcome::failed:
+    return "failed";
+  }
+  throw std::invalid_argument("Timeline event has an unknown outcome");
+}
+
 void append_json_node(std::ostringstream& output, const InspectorNode& node, std::size_t depth) {
   if (depth >= InspectorSnapshot::maximum_depth) {
     throw std::length_error("Inspector snapshot exceeds its maximum serialization depth");
@@ -848,6 +886,33 @@ std::string InspectorSnapshot::to_json() const {
     output << "null";
   }
   output << '}';
+  return std::move(output).str();
+}
+
+std::string TimelineSnapshot::to_json() const {
+  std::ostringstream output;
+  output.imbue(std::locale::classic());
+  output << "{\"version\":1,\"droppedEventCount\":" << dropped_event_count << ",\"events\":[";
+  for (std::size_t index = 0; index < events.size(); ++index) {
+    const TimelineEvent& event = events[index];
+    if (event.duration < std::chrono::nanoseconds::zero()) {
+      throw std::invalid_argument("Timeline event duration cannot be negative");
+    }
+    if (index != 0) {
+      output << ',';
+    }
+    output << "{\"sequence\":" << event.sequence << ",\"spanId\":" << event.span_id
+           << ",\"parentSpanId\":" << event.parent_span_id << ",\"frameId\":" << event.frame_id
+           << ",\"lane\":";
+    append_json_string(output, timeline_lane_name(event.lane));
+    output << ",\"phase\":";
+    append_json_string(output, timeline_phase_name(event.phase));
+    output << ",\"outcome\":";
+    append_json_string(output, timeline_outcome_name(event.outcome));
+    output << ",\"startNs\":" << event.start.count() << ",\"durationNs\":" << event.duration.count()
+           << ",\"pass\":" << event.pass << ",\"workCount\":" << event.work_count << '}';
+  }
+  output << "]}";
   return std::move(output).str();
 }
 
