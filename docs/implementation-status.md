@@ -41,7 +41,29 @@ Semantics tests cover initial and no-op preparation, detached ownership, strict
 generation growth, stale/duplicate results, reject/retry, child-first clear and
 retry, reset invalidation, malformed-tree transactionality, and synchronous/
 asynchronous exclusion. Separate platform/UI runner delivery, adapter
-replacement, actions, and shutdown are intentionally deferred to P0b.2.
+replacement, actions, and shutdown are delivered by P0b.2a below.
+
+### P0b.2a: Host Accessibility Service
+
+Status: H0 platform-neutral integration implemented and verified; native
+accessibility adapter runtime evidence remains platform-specific.
+
+`HostWindow` now queues desired semantics trees to the UI executor and applies
+owned bridge publications through a generation-addressed
+`AccessibilityAdapter` on the platform executor. One publication is in flight;
+new desired trees coalesce, failed batches remain explicitly retryable, and a
+successful retry converges to the latest desired tree. Error-handler retries are
+retained until failure acknowledgment. Adapter replacement atomically
+invalidates old publication/retry/action generations, resets acknowledgment to
+an empty model on the UI executor, and sends the replacement a complete add
+snapshot. Adapter destruction during replacement and shutdown occurs on the
+serialized platform path outside the coordinator mutex.
+
+Fake-host coverage includes publication before service installation, owned
+initial replay, latest-tree follow-up, apply failure and exact retry, publication
+during failure, retry from the error handler, retry/replacement races, stale and
+queued action invalidation, malformed actions, clear removals, and
+platform-affine shutdown release. P0b.2b text-input marshaling remains pending.
 
 ## M0: Headless Architecture
 

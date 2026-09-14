@@ -62,6 +62,7 @@ enum class HostErrorSource {
   platform_control,
   delegate_callback,
   shutdown,
+  accessibility,
 };
 
 using HostErrorHandler = std::function<void(WindowId, HostErrorSource, std::exception_ptr)>;
@@ -85,6 +86,13 @@ struct FrameRequest {
   friend constexpr bool operator==(FrameRequest, FrameRequest) = default;
 };
 
+struct AccessibilityServiceId {
+  std::uint64_t value{};
+
+  [[nodiscard]] constexpr bool valid() const noexcept { return value != 0; }
+  friend constexpr auto operator<=>(AccessibilityServiceId, AccessibilityServiceId) = default;
+};
+
 class HostWindowDelegate {
 public:
   virtual ~HostWindowDelegate() = default;
@@ -97,6 +105,7 @@ public:
   virtual void pointer_event(WindowId, PointerEvent) {}
   virtual void key_event(WindowId, KeyEvent) {}
   virtual void surface_changed(SurfaceEvent) {}
+  virtual void semantics_action(WindowId, std::uint64_t, SemanticsAction) {}
   virtual void close_requested(WindowId) {}
   virtual void window_shutting_down(WindowId) {}
 };
@@ -114,7 +123,8 @@ public:
 
 namespace detail {
 struct HostWindowState;
-}
+void shutdown_host_window(const std::shared_ptr<HostWindowState>& state) noexcept;
+} // namespace detail
 
 class HostWindow;
 class HostWindowDriver;
@@ -155,11 +165,16 @@ public:
   [[nodiscard]] bool request_frame() noexcept;
   [[nodiscard]] bool set_title(std::string title) noexcept;
   [[nodiscard]] bool request_close() noexcept;
+  [[nodiscard]] bool publish_semantics(SemanticsTree tree);
+  [[nodiscard]] bool clear_semantics();
+  [[nodiscard]] bool retry_semantics() noexcept;
   void shutdown() noexcept;
 
 private:
   friend class HostWindowDriver;
   friend struct HostWindowEndpoints;
+  friend void
+  detail::shutdown_host_window(const std::shared_ptr<detail::HostWindowState>& state) noexcept;
   friend HostWindowEndpoints make_host_window(WindowId, WindowConfiguration,
                                               std::shared_ptr<TaskRunner>,
                                               std::shared_ptr<TaskRunner>,
@@ -183,6 +198,10 @@ public:
   void send_pointer(PointerEvent event) noexcept;
   void send_key(KeyEvent event) noexcept;
   void set_surface_state(HostSurfaceState state) noexcept;
+  [[nodiscard]] std::optional<AccessibilityServiceId>
+  set_accessibility_adapter(std::shared_ptr<AccessibilityAdapter> adapter) noexcept;
+  void send_semantics_action(AccessibilityServiceId service, std::uint64_t node,
+                             SemanticsAction action) noexcept;
   void request_framework_close() noexcept;
   void shutdown() noexcept;
   [[nodiscard]] bool valid() const noexcept;

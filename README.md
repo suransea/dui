@@ -135,6 +135,9 @@ contract and acknowledges snapshots only after successful delivery, allowing
 failed native updates to retry without losing state.
 It also exposes owned, generation-tagged prepare/acknowledge/reject transactions
 for upcoming host delivery across separate platform and UI executors.
+The H0 host coordinator now uses those transactions for optional accessibility
+services, including coalesced desired trees, explicit failed-batch retry,
+generation-safe adapter replacement and actions, and platform-affine release.
 
 The native roadmap targets Linux, Android, macOS, iOS, and Windows through one
 shared host contract. Linux/Wayland is the first executable reference integration;

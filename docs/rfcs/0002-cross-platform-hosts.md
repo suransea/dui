@@ -239,12 +239,16 @@ replacing them. It is delivered as three independently reviewed commits:
   generation so a delayed old acknowledgment remains stale. Only one
   transaction may exist, and synchronous and asynchronous delivery cannot be
   mixed while it is pending.
-- P0b.2 attaches optional text-input and accessibility services to the host
-  coordinator. Text updates received before native start coalesce; replacement
-  and stop invalidate stale sessions. At most one semantics publication is in
-  flight; platform success/failure posts a generation-tagged result to the UI
-  executor, adapter replacement resets acknowledgment to empty, and native
-  semantics actions post back through the current delegate generation.
+- P0b.2a attaches an optional accessibility service to the host coordinator. At
+  most one semantics publication is in flight; platform success/failure posts a
+  publication/service-generation result to the UI executor, adapter replacement
+  resets acknowledgment to empty, and native semantics actions carry the
+  service generation before posting through the current delegate generation.
+  An adapter must start with an empty retained model and apply each batch
+  transactionally: throwing leaves that model unchanged.
+- P0b.2b attaches the optional text-input service. Text updates received before
+  native start coalesce; replacement and stop invalidate stale public sessions,
+  and native backend sessions remain private to the coordinator.
 - P0b.3 adds generation-bearing clipboard requests and coalesced cursor
   commands, then integrates all service invalidation and platform-affine release
   into host shutdown.

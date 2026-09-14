@@ -39,6 +39,15 @@ struct HostWindowState {
   std::weak_ptr<TaskRunner> ui_runner;
   std::shared_ptr<HostWindowControl> control;
   std::shared_ptr<RasterSurface> raster_surface;
+  std::shared_ptr<AccessibilityAdapter> accessibility_adapter;
+  AccessibilityBridge accessibility_bridge;
+  std::optional<SemanticsTree> desired_semantics;
+  std::uint64_t accessibility_generation{};
+  std::uint64_t accessibility_publication{};
+  std::uint64_t accessibility_publication_service{};
+  bool accessibility_in_flight{};
+  bool accessibility_retry_pending{};
+  bool accessibility_retry_requested{};
   HostErrorHandler error_handler;
 };
 
@@ -212,6 +221,7 @@ bool frame_generation_exhausted(const std::shared_ptr<State>& state) {
 
 void complete_platform_shutdown(const std::shared_ptr<State>& state) noexcept {
   std::shared_ptr<HostWindowControl> control;
+  std::shared_ptr<AccessibilityAdapter> accessibility_adapter;
   {
     std::lock_guard lock{state->mutex};
     if (state->platform_shutdown_complete) {
@@ -220,6 +230,7 @@ void complete_platform_shutdown(const std::shared_ptr<State>& state) noexcept {
     state->platform_shutdown_pending = false;
     state->platform_shutdown_complete = true;
     control = state->control;
+    accessibility_adapter = std::move(state->accessibility_adapter);
   }
   try {
     control->cancel_frame();
@@ -231,6 +242,7 @@ void complete_platform_shutdown(const std::shared_ptr<State>& state) noexcept {
   } catch (...) {
     report_error(state, HostErrorSource::shutdown, std::current_exception());
   }
+  accessibility_adapter.reset();
 }
 
 bool schedule_platform_shutdown(const std::shared_ptr<State>& state) noexcept {
@@ -252,6 +264,166 @@ bool schedule_platform_shutdown(const std::shared_ptr<State>& state) noexcept {
   std::lock_guard lock{state->mutex};
   state->platform_shutdown_pending = false;
   return false;
+}
+
+void dispatch_desired_semantics(const std::shared_ptr<State>& state) noexcept;
+void retry_semantics_on_ui(const std::shared_ptr<State>& state,
+                           std::uint64_t service_generation) noexcept;
+
+bool post_accessibility_publication(const std::shared_ptr<State>& state,
+                                    AccessibilityPublication publication,
+                                    AccessibilityServiceId service,
+                                    std::shared_ptr<AccessibilityAdapter> adapter) noexcept {
+  {
+    std::lock_guard lock{state->mutex};
+    if (!state->running || state->accessibility_adapter != adapter ||
+        state->accessibility_generation != service.value || state->accessibility_in_flight) {
+      static_cast<void>(state->accessibility_bridge.reject(publication.generation));
+      return true;
+    }
+    state->accessibility_in_flight = true;
+    state->accessibility_publication = publication.generation;
+    state->accessibility_publication_service = service.value;
+  }
+
+  if (!post_task(state, state->platform_runner.lock(),
+                 [state, publication = std::move(publication), service,
+                  adapter = std::move(adapter)]() mutable {
+                   {
+                     std::lock_guard lock{state->mutex};
+                     if (!state->running || state->accessibility_adapter != adapter ||
+                         state->accessibility_generation != service.value ||
+                         !state->accessibility_in_flight ||
+                         state->accessibility_publication != publication.generation) {
+                       return;
+                     }
+                   }
+                   bool success{};
+                   std::exception_ptr apply_failure;
+                   try {
+                     adapter->apply(publication.update.changes);
+                     success = true;
+                   } catch (...) {
+                     apply_failure = std::current_exception();
+                   }
+                   if (!post_task(
+                         state, state->ui_runner.lock(),
+                         [state, service, generation = publication.generation, success] {
+                           {
+                             std::lock_guard lock{state->mutex};
+                             if (!state->running || !state->accessibility_in_flight ||
+                                 state->accessibility_generation != service.value ||
+                                 state->accessibility_publication != generation ||
+                                 state->accessibility_publication_service != service.value) {
+                               return;
+                             }
+                           }
+                           if (success) {
+                             static_cast<void>(state->accessibility_bridge.acknowledge(generation));
+                           } else {
+                             static_cast<void>(state->accessibility_bridge.reject(generation));
+                           }
+                           bool retry_requested{};
+                           {
+                             std::lock_guard lock{state->mutex};
+                             state->accessibility_in_flight = false;
+                             state->accessibility_retry_pending = !success;
+                             retry_requested =
+                               std::exchange(state->accessibility_retry_requested, false);
+                           }
+                           if (success) {
+                             dispatch_desired_semantics(state);
+                           } else if (retry_requested) {
+                             retry_semantics_on_ui(state, service.value);
+                           }
+                         })) {
+                     detail::shutdown_host_window(state);
+                   }
+                   if (apply_failure != nullptr) {
+                     report_error(state, HostErrorSource::accessibility, std::move(apply_failure));
+                   }
+                 })) {
+    {
+      std::lock_guard lock{state->mutex};
+      if (state->accessibility_publication == publication.generation &&
+          state->accessibility_publication_service == service.value) {
+        state->accessibility_in_flight = false;
+      }
+    }
+    static_cast<void>(state->accessibility_bridge.reject(publication.generation));
+    return false;
+  }
+  return true;
+}
+
+void retry_semantics_on_ui(const std::shared_ptr<State>& state,
+                           std::uint64_t service_generation) noexcept {
+  try {
+    std::shared_ptr<AccessibilityAdapter> adapter;
+    AccessibilityServiceId service;
+    {
+      std::lock_guard lock{state->mutex};
+      if (!state->running || state->accessibility_adapter == nullptr ||
+          state->accessibility_generation != service_generation ||
+          state->accessibility_publication_service != service_generation) {
+        return;
+      }
+      if (state->accessibility_in_flight) {
+        state->accessibility_retry_requested = true;
+        return;
+      }
+      if (!state->accessibility_retry_pending) {
+        return;
+      }
+      adapter = state->accessibility_adapter;
+      service = {state->accessibility_generation};
+    }
+    std::optional<AccessibilityPublication> publication = state->accessibility_bridge.retry();
+    if (!publication.has_value()) {
+      return;
+    }
+    {
+      std::lock_guard lock{state->mutex};
+      state->accessibility_retry_pending = false;
+    }
+    if (!post_accessibility_publication(state, std::move(*publication), service,
+                                        std::move(adapter))) {
+      detail::shutdown_host_window(state);
+    }
+  } catch (...) {
+    report_error(state, HostErrorSource::accessibility, std::current_exception());
+    detail::shutdown_host_window(state);
+  }
+}
+
+void dispatch_desired_semantics(const std::shared_ptr<State>& state) noexcept {
+  try {
+    std::shared_ptr<AccessibilityAdapter> adapter;
+    std::optional<SemanticsTree> desired;
+    AccessibilityServiceId service;
+    {
+      std::lock_guard lock{state->mutex};
+      if (!state->running || state->accessibility_in_flight || state->accessibility_retry_pending ||
+          state->accessibility_adapter == nullptr || !state->desired_semantics.has_value()) {
+        return;
+      }
+      adapter = state->accessibility_adapter;
+      desired = state->desired_semantics;
+      service = {state->accessibility_generation};
+    }
+    std::optional<AccessibilityPublication> publication =
+      state->accessibility_bridge.prepare(*desired);
+    if (!publication.has_value()) {
+      return;
+    }
+    if (!post_accessibility_publication(state, std::move(*publication), service,
+                                        std::move(adapter))) {
+      detail::shutdown_host_window(state);
+    }
+  } catch (...) {
+    report_error(state, HostErrorSource::accessibility, std::current_exception());
+    detail::shutdown_host_window(state);
+  }
 }
 
 bool same_metrics(const WindowMetrics& current, Size logical_size, std::uint32_t physical_width,
@@ -429,6 +601,66 @@ bool HostWindow::request_close() noexcept {
   return true;
 }
 
+bool HostWindow::publish_semantics(SemanticsTree tree) {
+  if (state_ == nullptr) {
+    return false;
+  }
+  SemanticsDiffer validator;
+  static_cast<void>(validator.update(tree));
+  std::uint64_t service_generation{};
+  {
+    std::lock_guard lock{state_->mutex};
+    if (!state_->running) {
+      return false;
+    }
+    service_generation = state_->accessibility_generation;
+  }
+  if (!post_task(state_, state_->ui_runner.lock(),
+                 [state = state_, service_generation, tree = std::move(tree)]() mutable {
+                   bool dispatch{};
+                   {
+                     std::lock_guard lock{state->mutex};
+                     if (!state->running) {
+                       return;
+                     }
+                     state->desired_semantics = std::move(tree);
+                     dispatch = state->accessibility_generation == service_generation;
+                   }
+                   if (dispatch) {
+                     dispatch_desired_semantics(state);
+                   }
+                 })) {
+    shutdown();
+    return false;
+  }
+  return true;
+}
+
+bool HostWindow::clear_semantics() { return publish_semantics({}); }
+
+bool HostWindow::retry_semantics() noexcept {
+  if (state_ == nullptr || !valid()) {
+    return false;
+  }
+  std::uint64_t service_generation{};
+  {
+    std::lock_guard lock{state_->mutex};
+    if (state_->accessibility_adapter == nullptr ||
+        (!state_->accessibility_in_flight && !state_->accessibility_retry_pending) ||
+        state_->accessibility_publication_service != state_->accessibility_generation) {
+      return false;
+    }
+    service_generation = state_->accessibility_generation;
+  }
+  if (!post_task(state_, state_->ui_runner.lock(), [state = state_, service_generation] {
+        retry_semantics_on_ui(state, service_generation);
+      })) {
+    shutdown();
+    return false;
+  }
+  return true;
+}
+
 void HostWindow::shutdown() noexcept {
   if (state_ == nullptr) {
     return;
@@ -465,6 +697,16 @@ void HostWindow::shutdown() noexcept {
   const bool posted =
     post_task(state_, state_->ui_runner.lock(),
               [state = state_, delegate_generation, pointers = std::move(pointers), id]() mutable {
+                state->accessibility_bridge.reset_acknowledged();
+                {
+                  std::lock_guard lock{state->mutex};
+                  state->desired_semantics.reset();
+                  state->accessibility_in_flight = false;
+                  state->accessibility_retry_pending = false;
+                  state->accessibility_retry_requested = false;
+                  state->accessibility_publication = 0;
+                  state->accessibility_publication_service = 0;
+                }
                 for (PointerId pointer : pointers) {
                   invoke_delegate(
                     state, delegate_generation,
@@ -504,6 +746,14 @@ void HostWindow::shutdown() noexcept {
     static_cast<void>(schedule_platform_shutdown(state_));
   }
 }
+
+namespace detail {
+
+void shutdown_host_window(const std::shared_ptr<HostWindowState>& state) noexcept {
+  HostWindow{state}.shutdown();
+}
+
+} // namespace detail
 
 bool HostWindowDriver::valid() const noexcept {
   const std::shared_ptr<State> state = state_.lock();
@@ -942,6 +1192,107 @@ void HostWindowDriver::set_surface_state(HostSurfaceState surface) noexcept {
   if (!posted || !post_frame_control(state, cancel, frame_generation) ||
       frame_generation_exhausted(state)) {
     HostWindow{state}.shutdown();
+  }
+}
+
+std::optional<AccessibilityServiceId> HostWindowDriver::set_accessibility_adapter(
+  std::shared_ptr<AccessibilityAdapter> adapter) noexcept {
+  const std::shared_ptr<State> state = state_.lock();
+  if (state == nullptr) {
+    return std::nullopt;
+  }
+  std::lock_guard dispatch_lock{state->dispatch_mutex};
+  AccessibilityServiceId service;
+  bool exhausted{};
+  std::shared_ptr<AccessibilityAdapter> previous;
+  {
+    std::lock_guard lock{state->mutex};
+    if (!state->running) {
+      return std::nullopt;
+    }
+    if (state->accessibility_generation == std::numeric_limits<std::uint64_t>::max()) {
+      exhausted = true;
+    } else {
+      service = {++state->accessibility_generation};
+      previous = std::move(state->accessibility_adapter);
+      state->accessibility_adapter = std::move(adapter);
+      state->accessibility_in_flight = false;
+      state->accessibility_retry_pending = false;
+      state->accessibility_retry_requested = false;
+      state->accessibility_publication = 0;
+      state->accessibility_publication_service = 0;
+    }
+  }
+  previous.reset();
+  if (exhausted) {
+    report_error(
+      state, HostErrorSource::accessibility,
+      std::make_exception_ptr(std::overflow_error("Accessibility service generation exhausted")));
+    detail::shutdown_host_window(state);
+    return std::nullopt;
+  }
+  if (!post_task(state, state->ui_runner.lock(), [state, service] {
+        {
+          std::lock_guard lock{state->mutex};
+          if (!state->running || state->accessibility_generation != service.value) {
+            return;
+          }
+          state->accessibility_in_flight = false;
+          state->accessibility_retry_pending = false;
+          state->accessibility_retry_requested = false;
+          state->accessibility_publication = 0;
+          state->accessibility_publication_service = 0;
+        }
+        state->accessibility_bridge.reset_acknowledged();
+        dispatch_desired_semantics(state);
+      })) {
+    detail::shutdown_host_window(state);
+    return std::nullopt;
+  }
+  return service;
+}
+
+void HostWindowDriver::send_semantics_action(AccessibilityServiceId service, std::uint64_t node,
+                                             SemanticsAction action) noexcept {
+  const std::shared_ptr<State> state = state_.lock();
+  if (state == nullptr) {
+    return;
+  }
+  std::lock_guard dispatch_lock{state->dispatch_mutex};
+  std::uint64_t delegate_generation{};
+  WindowId id;
+  bool invalid{};
+  {
+    std::lock_guard lock{state->mutex};
+    if (!state->running || state->accessibility_adapter == nullptr ||
+        state->accessibility_generation != service.value) {
+      return;
+    }
+    invalid = !service.valid() || node == 0 ||
+              (action != SemanticsAction::activate && action != SemanticsAction::focus);
+    delegate_generation = state->delegate_generation;
+    id = state->id;
+  }
+  if (invalid) {
+    report_error(state, HostErrorSource::invalid_platform_event,
+                 std::make_exception_ptr(std::invalid_argument("Invalid semantics action")));
+    return;
+  }
+  if (!post_task(state, state->ui_runner.lock(),
+                 [state, service, delegate_generation, id, node, action] {
+                   {
+                     std::lock_guard lock{state->mutex};
+                     if (!state->running || state->accessibility_adapter == nullptr ||
+                         state->accessibility_generation != service.value) {
+                       return;
+                     }
+                   }
+                   invoke_delegate(state, delegate_generation,
+                                   [id, node, action](HostWindowDelegate& delegate) {
+                                     delegate.semantics_action(id, node, action);
+                                   });
+                 })) {
+    detail::shutdown_host_window(state);
   }
 }
 

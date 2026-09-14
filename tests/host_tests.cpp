@@ -106,6 +106,33 @@ protected:
   }
 };
 
+class RecordingAccessibilityAdapter final : public dui::AccessibilityAdapter {
+public:
+  void apply(std::span<const dui::SemanticsChange> changes) override {
+    deliveries.emplace_back(changes.begin(), changes.end());
+    if (fail_next) {
+      fail_next = false;
+      throw std::runtime_error("accessibility apply failed");
+    }
+  }
+
+  std::vector<std::vector<dui::SemanticsChange>> deliveries;
+  bool fail_next{};
+};
+
+dui::SemanticsNode semantics_node(std::uint64_t id, std::string label) {
+  return {id,
+          dui::SemanticsRole::button,
+          std::move(label),
+          {},
+          true,
+          {},
+          {dui::SemanticsAction::activate},
+          {},
+          false,
+          false};
+}
+
 class RecordingDelegate final : public dui::HostWindowDelegate {
 public:
   void window_created(dui::WindowId, dui::WindowMetrics metrics) override {
@@ -149,6 +176,10 @@ public:
                      std::to_string(event.generation));
     surfaces.push_back(event);
   }
+  void semantics_action(dui::WindowId, std::uint64_t node, dui::SemanticsAction action) override {
+    semantics_actions.emplace_back(node, action);
+    events.push_back("semantics:" + std::to_string(node));
+  }
   void close_requested(dui::WindowId) override {
     events.push_back("close");
     if (throw_on_close) {
@@ -162,6 +193,7 @@ public:
   std::vector<dui::PointerEvent> pointers;
   std::vector<dui::KeyEvent> keys;
   std::vector<dui::SurfaceEvent> surfaces;
+  std::vector<std::pair<std::uint64_t, dui::SemanticsAction>> semantics_actions;
   dui::HostWindow* window{};
   bool request_followup{};
   bool throw_on_close{};
@@ -176,6 +208,8 @@ struct Rig {
   std::shared_ptr<UnavailableSurface> surface{std::make_shared<UnavailableSurface>()};
   std::vector<dui::HostErrorSource> errors;
   bool shutdown_on_error{};
+  bool retry_on_accessibility_error{};
+  std::optional<bool> accessibility_retry_result;
   dui::HostWindowEndpoints endpoints;
 
   explicit Rig(bool visible = true)
@@ -186,6 +220,9 @@ struct Rig {
           static_cast<void>(endpoints.window.valid());
           if (shutdown_on_error) {
             endpoints.window.shutdown();
+          }
+          if (retry_on_accessibility_error && source == dui::HostErrorSource::accessibility) {
+            accessibility_retry_result = endpoints.window.retry_semantics();
           }
         })) {
     control->reentrant_window = &endpoints.window;
@@ -583,6 +620,148 @@ void shutdown_is_ordered_idempotent_and_invalidates_endpoints() {
   require(rig.errors.size() == error_count, "stopped driver emitted an invalid-event callback");
 }
 
+void accessibility_service_publishes_retries_and_replaces() {
+  Rig rig;
+  auto delegate = std::make_shared<RecordingDelegate>();
+  auto binding = rig.endpoints.window.bind_delegate(delegate);
+  rig.ui->run_all();
+
+  require(rig.endpoints.window.publish_semantics({{semantics_node(10, "initial")}}) &&
+            rig.platform->pending_count() == 0,
+          "semantics published without retaining an unavailable adapter target");
+  auto first_adapter = std::make_shared<RecordingAccessibilityAdapter>();
+  const auto first_service = rig.endpoints.driver.set_accessibility_adapter(first_adapter);
+  require(first_service.has_value() && first_service->valid(),
+          "accessibility adapter installation did not return a service generation");
+  rig.ui->run_all();
+  require(rig.platform->pending_count() == 1, "adapter installation did not replay desired tree");
+  rig.platform->run_all();
+  rig.ui->run_all();
+  require(first_adapter->deliveries.size() == 1 &&
+            first_adapter->deliveries.front().front().kind == dui::SemanticsChangeKind::added,
+          "initial accessibility publication was not a complete add batch");
+  require(!rig.endpoints.window.retry_semantics(),
+          "semantics retry was accepted without an in-flight or rejected transaction");
+
+  require(rig.endpoints.window.publish_semantics({{semantics_node(10, "second")}}) &&
+            rig.endpoints.window.publish_semantics({{semantics_node(10, "latest")}}),
+          "multiple desired semantics trees escaped one-publication-in-flight coalescing");
+  rig.ui->run_all();
+  require(rig.platform->pending_count() == 1,
+          "multiple desired semantics trees escaped one-publication-in-flight coalescing");
+  rig.platform->run_all();
+  rig.ui->run_all();
+  require(rig.platform->pending_count() == 1,
+          "acknowledgment did not schedule the latest desired semantics tree");
+  rig.platform->run_all();
+  rig.ui->run_all();
+  require(first_adapter->deliveries.size() == 3 &&
+            first_adapter->deliveries.back().front().entry.label == "latest",
+          "semantics follow-up did not converge to the latest desired tree");
+
+  first_adapter->fail_next = true;
+  static_cast<void>(rig.endpoints.window.publish_semantics({{semantics_node(10, "failed")}}));
+  rig.ui->run_all();
+  rig.platform->run_all();
+  rig.ui->run_all();
+  const auto failed_batch = first_adapter->deliveries.back();
+  static_cast<void>(
+    rig.endpoints.window.publish_semantics({{semantics_node(10, "after failure")}}));
+  rig.ui->run_all();
+  require(rig.errors.back() == dui::HostErrorSource::accessibility &&
+            rig.platform->pending_count() == 0 && rig.endpoints.window.valid() &&
+            rig.endpoints.window.retry_semantics(),
+          "failed accessibility apply was not reported and made explicitly retryable");
+  rig.ui->run_all();
+  rig.platform->run_all();
+  rig.ui->run_all();
+  require(first_adapter->deliveries.back() == failed_batch,
+          "accessibility retry changed the rejected owned batch");
+  require(rig.platform->pending_count() == 1,
+          "successful retry did not converge to the desired tree published during failure");
+  rig.platform->run_all();
+  rig.ui->run_all();
+  require(first_adapter->deliveries.back().front().entry.label == "after failure",
+          "accessibility retry follow-up lost the latest desired tree");
+
+  first_adapter->fail_next = true;
+  rig.retry_on_accessibility_error = true;
+  static_cast<void>(
+    rig.endpoints.window.publish_semantics({{semantics_node(10, "handler retry")}}));
+  rig.ui->run_all();
+  rig.platform->run_all();
+  require(rig.accessibility_retry_result == true,
+          "accessibility error handler could not retain an in-flight retry request");
+  rig.ui->run_all();
+  require(rig.platform->pending_count() == 1,
+          "error-handler retry was lost before the failure acknowledgment");
+  rig.platform->run_all();
+  rig.ui->run_all();
+  rig.retry_on_accessibility_error = false;
+
+  first_adapter->fail_next = true;
+  static_cast<void>(rig.endpoints.window.publish_semantics({{semantics_node(10, "replacement")}}));
+  rig.ui->run_all();
+  rig.platform->run_all();
+  rig.ui->run_all();
+  require(rig.endpoints.window.retry_semantics(),
+          "rejected old-service publication could not queue replacement race retry");
+  auto replacement = std::make_shared<RecordingAccessibilityAdapter>();
+  const auto replacement_service = rig.endpoints.driver.set_accessibility_adapter(replacement);
+  require(!rig.endpoints.window.retry_semantics(),
+          "replacement exposed the previous service's rejected transaction");
+  require(rig.ui->run_one() && rig.platform->pending_count() == 0,
+          "old-service retry was applied to the replacement adapter before reset");
+  rig.ui->run_all();
+  rig.platform->run_all();
+  rig.ui->run_all();
+  require(replacement_service.has_value() && replacement_service->value > first_service->value &&
+            replacement->deliveries.size() == 1 &&
+            replacement->deliveries.front().front().kind == dui::SemanticsChangeKind::added &&
+            replacement->deliveries.front().front().entry.label == "replacement",
+          "replacement adapter did not receive a fresh complete snapshot");
+
+  rig.endpoints.driver.send_semantics_action(*first_service, 10, dui::SemanticsAction::activate);
+  rig.endpoints.driver.send_semantics_action(*replacement_service, 10,
+                                             dui::SemanticsAction::activate);
+  auto final_adapter = std::make_shared<RecordingAccessibilityAdapter>();
+  const auto final_service = rig.endpoints.driver.set_accessibility_adapter(final_adapter);
+  require(final_service.has_value(), "final accessibility replacement failed");
+  rig.ui->run_all();
+  rig.platform->run_all();
+  rig.ui->run_all();
+  rig.endpoints.driver.send_semantics_action(*replacement_service, 10,
+                                             dui::SemanticsAction::activate);
+  rig.endpoints.driver.send_semantics_action(*final_service, 10, dui::SemanticsAction::activate);
+  rig.ui->run_all();
+  require(delegate->semantics_actions ==
+            std::vector<std::pair<std::uint64_t, dui::SemanticsAction>>{
+              {10, dui::SemanticsAction::activate}},
+          "queued or stale accessibility service action survived replacement");
+  rig.endpoints.driver.send_semantics_action(*final_service, 0, dui::SemanticsAction::activate);
+  require(rig.errors.back() == dui::HostErrorSource::invalid_platform_event,
+          "malformed semantics action was not contained");
+
+  static_cast<void>(rig.endpoints.window.clear_semantics());
+  rig.ui->run_all();
+  rig.platform->run_all();
+  rig.ui->run_all();
+  require(final_adapter->deliveries.back().front().kind == dui::SemanticsChangeKind::removed,
+          "host semantics clear did not publish removals");
+
+  std::weak_ptr<RecordingAccessibilityAdapter> weak_replacement = final_adapter;
+  first_adapter.reset();
+  replacement.reset();
+  final_adapter.reset();
+  rig.endpoints.window.shutdown();
+  rig.ui->run_all();
+  require(!weak_replacement.expired(),
+          "accessibility adapter was released before platform shutdown execution");
+  rig.platform->run_all();
+  require(weak_replacement.expired(),
+          "accessibility adapter was not released on platform shutdown execution");
+}
+
 void raster_surface_identity_remains_the_existing_boundary() {
   Rig rig;
   require(rig.endpoints.window.raster_surface() == rig.surface,
@@ -611,6 +790,7 @@ int main() {
     frame_timestamps_must_be_monotonic();
     shutdown_delivery_stays_weak_and_platform_affine();
     shutdown_is_ordered_idempotent_and_invalidates_endpoints();
+    accessibility_service_publishes_retries_and_replaces();
     raster_surface_identity_remains_the_existing_boundary();
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';

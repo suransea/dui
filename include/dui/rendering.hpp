@@ -300,6 +300,7 @@ public:
   virtual ~AccessibilityAdapter() = default;
 
   // The change span is valid only for the duration of this call.
+  // Throwing must leave the adapter's retained native model unchanged.
   virtual void apply(std::span<const SemanticsChange> changes) = 0;
 };
 
