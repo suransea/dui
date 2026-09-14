@@ -348,11 +348,14 @@ fractional plans keep buffer scale one while setting viewport destination to the
 logical extent. Manager removal is deferred while child objects exist. Every
 scale transition invalidates stale P1a plans, repaints a correctly sized buffer,
 and publishes matching physical extent and device-pixel ratio through
-`HostWindowDriver`. Weston configured at scale two must verify the advertised
-protocol path, a 240/120 preferred scale, doubled physical dimensions, viewport
-use, frame delivery, and sanitizer-clean shutdown. P1b.3 adds seat capability,
-pointer, and keyboard/xkbcommon input. P1b.4 adds wakeable cross-thread dispatch,
-a framework-facing `RasterSurface`, and recoverable surface recreation.
+`HostWindowDriver`. Weston configured at scale two must verify output binding,
+an effective 240/120 scale, doubled physical dimensions, frame delivery, and
+sanitizer-clean shutdown. It verifies viewport use as well when the compositor
+advertises both optional protocols; otherwise the generated and linked
+fractional path remains H1 until an H2 compositor advertises it. P1b.3 adds seat
+capability, pointer, and keyboard/xkbcommon input. P1b.4 adds wakeable
+cross-thread dispatch, a framework-facing `RasterSurface`, and recoverable
+surface recreation.
 
 Implement the Wayland host first. The client performs an initial bufferless
 commit to trigger `xdg_surface.configure`, waits for configure, coalesces

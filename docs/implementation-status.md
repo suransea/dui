@@ -207,9 +207,11 @@ fractional-scale and viewporter are available, one protocol object of each kind
 belongs to the window; compositor preferred scale drives P1a plans with buffer
 scale one and viewport destination equal to logical extent. Scale transitions
 must repaint, publish physical metrics and device-pixel ratio, and preserve the
-single-frame-callback gate. A scale-two Weston run provides H2 for this subset.
-Seat input follows in P1b.3; wakeable cross-thread dispatch, `RasterSurface`, and
-recoverable native surface recreation follow in P1b.4.
+single-frame-callback gate. A scale-two Weston run provides H2 for its advertised
+integer fallback and conditionally the fractional path; absent optional globals,
+fractional integration remains H1. Seat input follows in P1b.3; wakeable
+cross-thread dispatch, `RasterSurface`, and recoverable native surface
+recreation follow in P1b.4.
 
 ## M0: Headless Architecture
 

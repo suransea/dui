@@ -144,6 +144,45 @@ const char* interface_name(GlobalKind kind) noexcept {
 } // namespace
 
 struct WaylandConnection::Impl {
+  struct Output {
+    Impl* owner{};
+    wl_output* proxy{};
+    std::uint32_t name{};
+    std::uint32_t version{};
+    std::uint32_t scale{1};
+
+    ~Output() {
+      if (proxy == nullptr) {
+        return;
+      }
+      if (version >= WL_OUTPUT_RELEASE_SINCE_VERSION) {
+        wl_output_release(proxy);
+      } else {
+        wl_output_destroy(proxy);
+      }
+    }
+
+    static void handle_geometry(void*, wl_output*, std::int32_t, std::int32_t, std::int32_t,
+                                std::int32_t, std::int32_t, const char*, const char*,
+                                std::int32_t) noexcept {}
+    static void handle_mode(void*, wl_output*, std::uint32_t, std::int32_t, std::int32_t,
+                            std::int32_t) noexcept {}
+    static void handle_done(void*, wl_output*) noexcept {}
+    static void handle_scale(void* data, wl_output*, std::int32_t factor) noexcept {
+      auto& self = *static_cast<Output*>(data);
+      if (factor <= 0 ||
+          static_cast<std::uint32_t>(factor) >
+            std::numeric_limits<std::uint32_t>::max() / WaylandSurfaceState::scale_denominator) {
+        self.owner->callback_failed = true;
+        return;
+      }
+      self.scale = static_cast<std::uint32_t>(factor);
+      self.owner->notify_output(self.proxy, false);
+    }
+    static void handle_name(void*, wl_output*, const char*) noexcept {}
+    static void handle_description(void*, wl_output*, const char*) noexcept {}
+  };
+
   wl_display* display{};
   wl_registry* registry{};
   wl_compositor* compositor{};
@@ -167,12 +206,15 @@ struct WaylandConnection::Impl {
   void* active_window{};
   void (*fail_active_window)(void*) noexcept {};
   std::array<std::uint32_t, 6> deferred_removals{};
+  std::vector<std::unique_ptr<Output>> outputs;
   bool transport_failed{};
+  void (*active_output_changed)(void*, wl_output*, bool) noexcept {};
 
   ~Impl() {
     if (std::this_thread::get_id() != owner || active_windows != 0) {
       std::terminate();
     }
+    outputs.clear();
     if (fractional_scale != nullptr) {
       wp_fractional_scale_manager_v1_destroy(fractional_scale);
     }
@@ -213,6 +255,44 @@ struct WaylandConnection::Impl {
     if (active_window != nullptr && fail_active_window != nullptr) {
       fail_active_window(active_window);
     }
+  }
+
+  void notify_output(wl_output* output, bool removed) noexcept {
+    if (active_window != nullptr && active_output_changed != nullptr) {
+      active_output_changed(active_window, output, removed);
+    }
+  }
+
+  void bind_output(std::uint32_t name, std::uint32_t version) noexcept {
+    try {
+      auto output = std::make_unique<Output>();
+      output->owner = this;
+      output->name = name;
+      output->version = std::min(version, 4U);
+      output->proxy = static_cast<wl_output*>(
+        wl_registry_bind(registry, name, &wl_output_interface, output->version));
+      if (output->proxy == nullptr) {
+        callback_failed = true;
+        return;
+      }
+      static constexpr wl_output_listener listener{
+        Output::handle_geometry, Output::handle_mode, Output::handle_done,
+        Output::handle_scale,    Output::handle_name, Output::handle_description};
+      if (wl_output_add_listener(output->proxy, &listener, output.get()) != 0) {
+        callback_failed = true;
+        return;
+      }
+      outputs.push_back(std::move(output));
+      globals.output_count = static_cast<std::uint32_t>(outputs.size());
+    } catch (...) {
+      callback_failed = true;
+    }
+  }
+
+  std::uint32_t output_scale(wl_output* proxy) const noexcept {
+    const auto output =
+      std::ranges::find(outputs, proxy, [](const auto& value) { return value->proxy; });
+    return output == outputs.end() ? 1U : (*output)->scale;
   }
 
   void bind(std::uint32_t name, const char* interface, std::uint32_t version) noexcept {
@@ -289,6 +369,10 @@ struct WaylandConnection::Impl {
   }
 
   void advertise(std::uint32_t name, const char* interface, std::uint32_t version) noexcept {
+    if (std::strcmp(interface, wl_output_interface.name) == 0 && version != 0) {
+      bind_output(name, version);
+      return;
+    }
     const std::optional<GlobalKind> kind = global_kind(interface);
     if (!kind.has_value() || version == 0) {
       return;
@@ -303,6 +387,14 @@ struct WaylandConnection::Impl {
   }
 
   void remove(std::uint32_t name) noexcept {
+    const auto output =
+      std::ranges::find(outputs, name, [](const auto& value) { return value->name; });
+    if (output != outputs.end()) {
+      notify_output((*output)->proxy, true);
+      outputs.erase(output);
+      globals.output_count = static_cast<std::uint32_t>(outputs.size());
+      return;
+    }
     const auto offer = std::ranges::find(offers, name, &GlobalOffer::name);
     if (offer == offers.end()) {
       return;
@@ -317,7 +409,8 @@ struct WaylandConnection::Impl {
       (kind == GlobalKind::shm && name == shm_name && shm != nullptr) ||
       (kind == GlobalKind::compositor && name == compositor_name && compositor != nullptr);
     const bool has_active_children =
-      kind == GlobalKind::compositor || kind == GlobalKind::shm || kind == GlobalKind::wm_base;
+      kind == GlobalKind::compositor || kind == GlobalKind::shm || kind == GlobalKind::wm_base ||
+      kind == GlobalKind::viewporter || kind == GlobalKind::fractional_scale;
     if (selected && active_windows != 0 && has_active_children) {
       deferred_removals[static_cast<std::size_t>(kind)] = name;
       return;
@@ -431,6 +524,11 @@ struct WaylandWindow::Impl {
       const std::uint64_t unwrapped = owner->frame_millisecond_epoch + milliseconds;
       owner->endpoints.driver.frame_pulse(
         std::chrono::milliseconds{static_cast<std::int64_t>(unwrapped)}, host_generation);
+      try {
+        owner->present();
+      } catch (...) {
+        owner->fail_native();
+      }
     }
   };
 
@@ -495,6 +593,8 @@ struct WaylandWindow::Impl {
   wl_surface* surface{};
   xdg_surface* shell_surface{};
   xdg_toplevel* toplevel{};
+  wp_viewport* viewport{};
+  wp_fractional_scale_v1* fractional_scale{};
   std::shared_ptr<Control> control;
   HostWindowEndpoints endpoints;
   std::vector<std::unique_ptr<Buffer>> buffers;
@@ -503,11 +603,17 @@ struct WaylandWindow::Impl {
   std::uint64_t committed_buffers{};
   std::uint64_t frame_millisecond_epoch{};
   std::uint32_t last_frame_milliseconds{};
+  WaylandExtent committed_extent{};
+  std::uint32_t committed_scale{WaylandSurfaceState::scale_denominator};
+  bool committed_with_viewporter{};
+  std::vector<wl_output*> entered_outputs;
   bool native_running{true};
   bool registered{};
 
   Impl(WaylandConnection::Impl& connection_value, WaylandExtent initial_extent)
-    : connection(&connection_value), surface_state(initial_extent) {}
+    : connection(&connection_value),
+      surface_state(initial_extent, connection_value.viewporter != nullptr &&
+                                      connection_value.fractional_scale != nullptr) {}
 
   ~Impl() {
     if (std::this_thread::get_id() != connection->owner) {
@@ -523,6 +629,7 @@ struct WaylandWindow::Impl {
       --connection->active_windows;
       connection->active_window = nullptr;
       connection->fail_active_window = nullptr;
+      connection->active_output_changed = nullptr;
       if (!connection->transport_failed) {
         for (std::uint32_t& name : connection->deferred_removals) {
           if (name != 0) {
@@ -611,6 +718,10 @@ struct WaylandWindow::Impl {
       xdg_surface_ack_configure(shell_surface, *plan->configure_serial);
     }
     wl_surface_set_buffer_scale(surface, static_cast<std::int32_t>(plan->buffer_scale));
+    if (plan->use_viewporter) {
+      wp_viewport_set_destination(viewport, static_cast<std::int32_t>(plan->logical_extent.width),
+                                  static_cast<std::int32_t>(plan->logical_extent.height));
+    }
     if (plan->request_frame_callback) {
       auto requested_frame = std::make_unique<Frame>();
       requested_frame->owner = this;
@@ -633,6 +744,9 @@ struct WaylandWindow::Impl {
     wl_surface_commit(surface);
     buffers.push_back(std::move(buffer));
     ++committed_buffers;
+    committed_extent = plan->buffer_extent;
+    committed_scale = plan->scale_numerator;
+    committed_with_viewporter = plan->use_viewporter;
     endpoints.driver.set_metrics({static_cast<double>(plan->logical_extent.width),
                                   static_cast<double>(plan->logical_extent.height)},
                                  plan->buffer_extent.width, plan->buffer_extent.height,
@@ -652,6 +766,14 @@ struct WaylandWindow::Impl {
     native_running = false;
     frame.reset();
     buffers.clear();
+    if (fractional_scale != nullptr) {
+      wp_fractional_scale_v1_destroy(fractional_scale);
+      fractional_scale = nullptr;
+    }
+    if (viewport != nullptr) {
+      wp_viewport_destroy(viewport);
+      viewport = nullptr;
+    }
     if (toplevel != nullptr) {
       xdg_toplevel_destroy(toplevel);
       toplevel = nullptr;
@@ -670,6 +792,67 @@ struct WaylandWindow::Impl {
     auto& self = *static_cast<Impl*>(data);
     try {
       self.surface_state.receive_surface_configure(serial);
+      self.present();
+    } catch (...) {
+      self.fail_native();
+    }
+  }
+
+  void apply_output_scale() noexcept {
+    if (fractional_scale != nullptr) {
+      return;
+    }
+    std::uint32_t factor{1};
+    for (wl_output* output : entered_outputs) {
+      factor = std::max(factor, connection->output_scale(output));
+    }
+    try {
+      surface_state.set_preferred_scale(factor * WaylandSurfaceState::scale_denominator);
+      present();
+    } catch (...) {
+      fail_native();
+    }
+  }
+
+  void output_changed(wl_output* output, bool removed) noexcept {
+    if (removed) {
+      std::erase(entered_outputs, output);
+    }
+    apply_output_scale();
+  }
+
+  static void handle_surface_enter(void* data, wl_surface*, wl_output* output) noexcept {
+    auto& self = *static_cast<Impl*>(data);
+    if (std::ranges::find(self.entered_outputs, output) == self.entered_outputs.end()) {
+      try {
+        self.entered_outputs.push_back(output);
+      } catch (...) {
+        self.fail_native();
+        return;
+      }
+    }
+    self.apply_output_scale();
+  }
+
+  static void handle_surface_leave(void* data, wl_surface*, wl_output* output) noexcept {
+    auto& self = *static_cast<Impl*>(data);
+    std::erase(self.entered_outputs, output);
+    self.apply_output_scale();
+  }
+
+  static void handle_preferred_buffer_scale(void* data, wl_surface*, std::int32_t factor) noexcept {
+    if (factor <= 0) {
+      static_cast<Impl*>(data)->fail_native();
+    }
+  }
+
+  static void handle_preferred_buffer_transform(void*, wl_surface*, std::uint32_t) noexcept {}
+
+  static void handle_fractional_scale(void* data, wp_fractional_scale_v1*,
+                                      std::uint32_t scale) noexcept {
+    auto& self = *static_cast<Impl*>(data);
+    try {
+      self.surface_state.set_preferred_scale(scale);
       self.present();
     } catch (...) {
       self.fail_native();
@@ -790,9 +973,36 @@ std::unique_ptr<WaylandWindow> WaylandWindow::create(WaylandConnection& connecti
   connection.impl_->fail_active_window = [](void* window) noexcept {
     static_cast<Impl*>(window)->fail_native();
   };
+  connection.impl_->active_output_changed = [](void* window, wl_output* output,
+                                               bool removed) noexcept {
+    static_cast<Impl*>(window)->output_changed(output, removed);
+  };
   impl->surface = wl_compositor_create_surface(connection.impl_->compositor);
   if (impl->surface == nullptr) {
     throw std::runtime_error("Could not create Wayland surface");
+  }
+  static constexpr wl_surface_listener native_surface_listener{
+    Impl::handle_surface_enter, Impl::handle_surface_leave, Impl::handle_preferred_buffer_scale,
+    Impl::handle_preferred_buffer_transform};
+  if (wl_surface_add_listener(impl->surface, &native_surface_listener, impl.get()) != 0) {
+    throw std::runtime_error("Could not install Wayland core surface listener");
+  }
+  if (connection.impl_->viewporter != nullptr && connection.impl_->fractional_scale != nullptr) {
+    impl->viewport = wp_viewporter_get_viewport(connection.impl_->viewporter, impl->surface);
+    if (impl->viewport == nullptr) {
+      throw std::runtime_error("Could not create Wayland viewport");
+    }
+    impl->fractional_scale = wp_fractional_scale_manager_v1_get_fractional_scale(
+      connection.impl_->fractional_scale, impl->surface);
+    if (impl->fractional_scale == nullptr) {
+      throw std::runtime_error("Could not create Wayland fractional-scale object");
+    }
+    static constexpr wp_fractional_scale_v1_listener fractional_listener{
+      Impl::handle_fractional_scale};
+    if (wp_fractional_scale_v1_add_listener(impl->fractional_scale, &fractional_listener,
+                                            impl.get()) != 0) {
+      throw std::runtime_error("Could not install Wayland fractional-scale listener");
+    }
   }
   impl->shell_surface = xdg_wm_base_get_xdg_surface(connection.impl_->wm_base, impl->surface);
   if (impl->shell_surface == nullptr) {
@@ -840,7 +1050,10 @@ HostWindow WaylandWindow::window() const {
 
 WaylandWindowStatus WaylandWindow::status() const {
   impl_->connection->require_owner();
-  return {impl_->surface_state.configured(), impl_->committed_buffers, impl_->frame != nullptr};
+  return {impl_->surface_state.configured(), impl_->committed_buffers,
+          impl_->frame != nullptr,           impl_->committed_extent.width,
+          impl_->committed_extent.height,    impl_->committed_scale,
+          impl_->committed_with_viewporter};
 }
 
 } // namespace dui::platform

@@ -170,6 +170,33 @@ void frame_callbacks_gate_content_without_blocking_configure() {
           "frame demand did not resume once the matching callback completed");
 }
 
+void scale_changes_replace_frames_without_accepting_stale_generations() {
+  using dui::platform::WaylandExtent;
+  using dui::platform::WaylandSurfaceState;
+
+  WaylandSurfaceState state{{160, 100}};
+  static_cast<void>(state.begin_initial_commit());
+  state.request_frame();
+  state.receive_surface_configure(50);
+  const auto first = state.prepare_commit();
+  require(first.has_value() && first->request_frame_callback && state.submit_commit(*first),
+          "initial scale test frame did not commit");
+
+  state.set_preferred_scale(240);
+  const auto scaled = state.prepare_commit();
+  require(scaled.has_value() && !scaled->request_frame_callback &&
+            scaled->buffer_extent == WaylandExtent{320, 200} && state.submit_commit(*scaled),
+          "scale transition did not repaint behind the outstanding callback");
+  state.request_frame();
+  require(!state.prepare_commit().has_value() && state.frame_done(first->generation),
+          "outstanding pre-scale callback did not retain its exact gate");
+  const auto replacement = state.prepare_commit();
+  require(replacement.has_value() && replacement->request_frame_callback &&
+            replacement->buffer_extent == WaylandExtent{320, 200} &&
+            state.submit_commit(*replacement),
+          "scaled frame demand did not resume after the old callback");
+}
+
 } // namespace
 
 int main() {
@@ -178,6 +205,7 @@ int main() {
     stale_plans_and_buffer_failures_remain_retryable();
     integer_and_fractional_scaling_are_explicit();
     frame_callbacks_gate_content_without_blocking_configure();
+    scale_changes_replace_frames_without_accepting_stale_generations();
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';
     return 1;

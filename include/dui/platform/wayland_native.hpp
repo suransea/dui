@@ -17,6 +17,7 @@ struct WaylandGlobals {
   std::uint32_t xdg_wm_base_version{};
   std::uint32_t viewporter_version{};
   std::uint32_t fractional_scale_version{};
+  std::uint32_t output_count{};
 
   [[nodiscard]] constexpr bool window_ready() const noexcept {
     return compositor_version != 0 && shm_version != 0 && xdg_wm_base_version != 0;
@@ -53,6 +54,10 @@ struct WaylandWindowStatus {
   bool configured{};
   std::uint64_t committed_buffers{};
   bool frame_callback_pending{};
+  std::uint32_t physical_width{};
+  std::uint32_t physical_height{};
+  std::uint32_t scale_numerator{120};
+  bool uses_viewporter{};
 };
 
 class WaylandWindow {

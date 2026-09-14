@@ -14,9 +14,9 @@ jobs:
       - name: Configure
         run: cmake -S . -B build/wayland -G Ninja -DCMAKE_BUILD_TYPE=Debug -DDUI_ENABLE_SANITIZERS=ON -DDUI_REQUIRE_WAYLAND_NATIVE=ON
       - name: Build
-        run: cmake --build build/wayland --target dui_wayland_native_link_tests dui_wayland_native_window_tests
-      - name: Link smoke test
-        run: ctest --test-dir build/wayland -R dui_wayland_native_link_tests --output-on-failure
+        run: cmake --build build/wayland --target dui_wayland_state_tests dui_wayland_native_link_tests dui_wayland_native_window_tests
+      - name: State and link tests
+        run: ctest --test-dir build/wayland -R 'dui_wayland_(state|native_link)_tests' --output-on-failure
       - name: Headless Weston window test
         shell: bash
         run: |
@@ -24,7 +24,7 @@ jobs:
           export WAYLAND_DISPLAY=dui-wayland-test
           mkdir -p "$XDG_RUNTIME_DIR"
           chmod 700 "$XDG_RUNTIME_DIR"
-          weston --backend=headless-backend.so --socket="$WAYLAND_DISPLAY" --idle-time=0 >"$RUNNER_TEMP/weston.log" 2>&1 &
+          weston --backend=headless-backend.so --socket="$WAYLAND_DISPLAY" --idle-time=0 --scale=2 >"$RUNNER_TEMP/weston.log" 2>&1 &
           weston_pid=$!
           trap 'kill "$weston_pid" || true' EXIT
           for attempt in {1..50}; do

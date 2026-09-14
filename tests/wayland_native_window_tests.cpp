@@ -41,6 +41,10 @@ void require(bool condition, const char* message) {
 int main() {
   try {
     auto connection = dui::platform::WaylandConnection::connect();
+    const auto globals = connection->globals();
+    require(globals.output_count != 0, "Wayland compositor advertised no output");
+    const bool fractional_path =
+      globals.viewporter_version != 0 && globals.fractional_scale_version != 0;
     auto native_window = dui::platform::WaylandWindow::create(
       *connection, {1}, {"DUI Wayland H2", {320.0, 200.0}, 320, 200, 1.0, true});
     auto host_window = native_window->window();
@@ -49,18 +53,30 @@ int main() {
     require(host_window.request_frame(), "host rejected the initial Wayland frame request");
     require(host_window.request_frame(), "host rejected coalesced Wayland frame demand");
 
-    for (int iteration = 0; iteration < 100 && delegate->frames.empty(); ++iteration) {
+    for (int iteration = 0; iteration < 100; ++iteration) {
       connection->roundtrip();
-      if (delegate->frames.empty()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+      const auto current = native_window->status();
+      if (!delegate->frames.empty() && current.scale_numerator == 240) {
+        break;
       }
+      std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
     const auto status = native_window->status();
     require(delegate->created, "Wayland host did not create its framework delegate");
     require(status.configured && status.committed_buffers != 0,
             "xdg configure did not produce a diagnostic shared-memory buffer");
+    require(status.uses_viewporter == fractional_path && status.scale_numerator == 240 &&
+              status.physical_width == 640 && status.physical_height == 400,
+            "native scaling path did not apply the scale-two Weston output");
+    const auto metrics = host_window.metrics();
+    require(metrics.has_value() && metrics->physical_width == 640 &&
+              metrics->physical_height == 400 && metrics->device_pixel_ratio == 2.0,
+            "scaled Wayland commit did not publish matching host metrics");
     if (delegate->frames.size() != 1 || delegate->frames.front().window != dui::WindowId{1} ||
-        delegate->frames.front().timestamp < std::chrono::nanoseconds::zero()) {
+        delegate->frames.front().timestamp < std::chrono::nanoseconds::zero() ||
+        delegate->frames.front().metrics.physical_width != 640 ||
+        delegate->frames.front().metrics.physical_height != 400 ||
+        delegate->frames.front().metrics.device_pixel_ratio != 2.0) {
       throw std::runtime_error("Wayland frame callback count was " +
                                std::to_string(delegate->frames.size()) +
                                ", pending=" + (status.frame_callback_pending ? "true" : "false"));
