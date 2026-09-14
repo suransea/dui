@@ -54,6 +54,10 @@ objects. Framework embedding code owns each `HostWindowDelegate` and its
 corresponding `BuildOwner`; a window retains only a generation-checked,
 non-owning delegate registration. Detaching or destroying the delegate
 invalidates queued delivery before framework state is released.
+The embedding also owns the platform and UI task runners and keeps them alive
+until window shutdown has drained. `TaskRunner::post` only enqueues and never
+invokes the task inline. A throwing `post` has the strong exception guarantee:
+the supplied task was not enqueued.
 
 A `HostWindow` owns one native window/view, its device-pixel ratio, logical
 extent, visibility, focus state, platform-side text-input and accessibility
@@ -179,13 +183,57 @@ contract tests and do not grant a broader claim than the evidence.
 
 ### P0: Host Contract
 
-Define the platform-neutral interfaces and a deterministic fake host. Acceptance
-requires frame-request coalescing, resize/scale ordering, focus loss, pointer and
-key forwarding, generation-safe text sessions, semantics acknowledgement and
-retry, temporary/out-of-date/lost surface handling, exception containment,
-shutdown ordering, and old delegate/window handle invalidation. This slice is H0
-for the shared contract in each environment where those tests are recorded; it
-does not assign a native tier to untested platforms.
+P0 is split into two committed sub-slices so native lifecycle and asynchronous
+service transactions can be reviewed independently.
+
+P0a adds `dui/host.hpp` with strong `WindowId`, validated generation-bearing
+`WindowMetrics`, `TaskRunner`, `HostWindowDelegate`, `HostWindowControl`, copyable
+`HostWindow`, platform-facing `HostWindowDriver`, move-only `DelegateBinding`,
+`HostApplication`, and a factory returning paired window/driver endpoints. The
+window is a shared coordinator, not a native subclass. Framework commands post
+to the platform runner; translated native events post to the UI runner. The
+driver is weak and its entry points are serialized by the native adapter on the
+platform executor; coordinator locking protects lifetime and cross-executor
+state, not ordering among concurrent native producers. Every queued delegate
+event captures a binding generation, and shutdown makes all copied endpoints
+inert.
+
+P0a moves the existing pointer event value to the platform-neutral input header
+while retaining temporary `BuildOwner` aliases. Metrics include logical and
+physical extent, DPR, and a nonzero generation; invalid or overflowing updates
+are contained. Frame demand coalesces to one native request, parks while hidden
+or while the surface is unavailable/out-of-date/lost, resumes once when usable,
+and captures the metrics generation accepted by a pulse. Visibility or focus
+loss emits sorted cancellation for active pointers before lifecycle callbacks.
+Replacing or detaching a delegate terminates its active pointer streams so a new
+`BuildOwner` cannot inherit a move, up, or cancellation without the corresponding
+down. Accepted frame timestamps are non-negative and monotonic. A failed native
+frame-control request clears its armed demand so a later framework request may
+retry. Failure to enqueue a translated native event stops the coordinator rather
+than retaining mutated state without its matching callback. Shutdown never
+invokes platform control outside the platform executor when posting fails. No
+delegate, runner, control, or error callback executes while coordinator state is
+locked. Acceptance covers validation and generation, weak binding/rebinding,
+separate FIFO runners, callback ordering, frame re-request, stale pulses,
+pointer/key validation, all surface transitions, exception containment,
+idempotent ordered shutdown, and inert old handles. This establishes H0 only in
+the environments where the fake-runner/control tests execute.
+
+The older `Backend`/`NativeView` API remains temporarily available for existing
+raster and rendering tests. It is a compatibility seam, not a second lifecycle
+contract; native integrations use `HostWindow`, and later rendering work either
+adapts or retires the old types once their remaining renderer responsibilities
+have moved behind the host/raster boundary.
+
+P0b adds generation-safe text-input marshaling, owned asynchronous semantics
+publication with acknowledgment/retry, clipboard requests, and cursor commands.
+It adapts the existing `TextInputBackend` and `AccessibilityBridge` rather than
+replacing them. Text updates received before native start coalesce; replacement
+and stop invalidate stale sessions. At most one semantics publication is in
+flight, adapter failure retains the last acknowledged tree, and explicit retry
+replays the complete delta. P0b acceptance adds service replacement, stale
+callback, failure/retry, and shutdown tests without emulating an IME or native
+accessibility client.
 
 ### P1: Linux Reference Host Integration
 

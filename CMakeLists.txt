@@ -31,7 +31,7 @@ function(dui_configure_target target)
     endif()
 endfunction()
 
-add_library(dui src/animation.cpp src/backend.cpp src/input.cpp src/rendering.cpp src/task.cpp src/ui.cpp)
+add_library(dui src/animation.cpp src/backend.cpp src/host.cpp src/input.cpp src/rendering.cpp src/task.cpp src/ui.cpp)
 add_library(dui::dui ALIAS dui)
 
 target_include_directories(dui PUBLIC
@@ -75,6 +75,11 @@ if(DUI_BUILD_TESTS)
     target_link_libraries(dui_restoration_tests PRIVATE dui::dui)
     dui_configure_target(dui_restoration_tests)
     add_test(NAME dui_restoration_tests COMMAND dui_restoration_tests)
+
+    add_executable(dui_host_tests tests/host_tests.cpp)
+    target_link_libraries(dui_host_tests PRIVATE dui::dui)
+    dui_configure_target(dui_host_tests)
+    add_test(NAME dui_host_tests COMMAND dui_host_tests)
 
     add_executable(dui_rendering_tests tests/rendering_tests.cpp)
     target_link_libraries(dui_rendering_tests PRIVATE dui::dui)

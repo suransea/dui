@@ -6,8 +6,8 @@ typed view descriptions with a persistent runtime element tree.
 
 The current implementation is intentionally headless. It validates build,
 identity, reconciliation, state, dependency tracking, box and Sliver layout,
-painting, hit testing, pointer activation, and the NativeView/Renderer boundary
-before introducing a production graphics backend.
+painting, hit testing, pointer activation, and a platform-neutral `HostWindow`
+contract before introducing a production graphics backend or native host.
 
 Frames are represented by immutable retained `LayerTree` snapshots. Declarative
 `RepaintBoundary` Views isolate paint work, while the compatibility renderer
@@ -141,6 +141,13 @@ AppKit/UIKit adapters over shared C++ and Metal seams, and Windows integrates th
 existing IMM32/UI Automation work into the same lifecycle. Build-only,
 simulator/compositor, and physical-device verification are reported separately;
 see [RFC 0002](docs/rfcs/0002-cross-platform-hosts.md).
+
+The implemented H0 contract uses separate platform and UI `TaskRunner`s, weak
+generation-checked delegates, validated metrics/input/surface events, coalesced
+frame demand, and executor-affine orderly shutdown. Its deterministic fake-host
+tests do not claim an H1 native build or H2 native runtime. The earlier
+`Backend`/`NativeView` API remains temporarily for existing raster tests and is
+not an alternative native lifecycle contract.
 
 ## Build
 

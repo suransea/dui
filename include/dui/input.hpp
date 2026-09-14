@@ -17,6 +17,16 @@ namespace dui {
 
 using PointerId = std::int64_t;
 
+enum class PointerPhase { down, move, up, cancel };
+
+struct PointerEvent {
+  PointerId pointer{};
+  PointerPhase phase{};
+  Offset position{};
+
+  friend constexpr bool operator==(PointerEvent, PointerEvent) = default;
+};
+
 class GestureArenaMember {
 public:
   virtual ~GestureArenaMember() = default;

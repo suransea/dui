@@ -451,13 +451,8 @@ private:
 
 class BuildOwner {
 public:
-  enum class PointerPhase { down, move, up, cancel };
-
-  struct PointerEvent {
-    std::int64_t pointer{};
-    PointerPhase phase{};
-    Offset position{};
-  };
+  using PointerPhase = dui::PointerPhase;
+  using PointerEvent = dui::PointerEvent;
 
   BuildOwner();
   ~BuildOwner();

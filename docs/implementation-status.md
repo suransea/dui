@@ -1,5 +1,29 @@
 # Implementation Status
 
+## P0a: Cross-Platform Host Contract
+
+Status: H0 platform-neutral contract implemented and verified; no native host
+implementation is claimed.
+
+The shared host slice adds strong window IDs, validated generation-bearing
+metrics, separate platform/UI task runners, weak generation-checked delegate
+bindings, copyable framework windows, weak native drivers, native control
+commands, frame coalescing, surface recovery state, input forwarding, and
+ordered shutdown. Native driver entries are serialized on the platform
+executor. Framework callbacks run on the UI executor, native control runs on the
+platform executor, and no external callback runs while coordinator state is
+locked.
+
+Deterministic fake-runner/control tests cover creation and lifecycle order,
+metrics and surface generations, stale and non-monotonic frame pulses,
+re-request/coalescing, unavailable/out-of-date/lost surfaces, pointer stream
+validation and cancellation, key values, weak rebinding, delegate/control/task
+failure, failed frame-control retry, executor-affine shutdown, and inert copied
+handles. A task-post failure stops mutated coordinator state rather than
+continuing without the corresponding event. The existing `Backend`/`NativeView`
+types remain a temporary raster-test compatibility seam; `HostWindow` is the
+native lifecycle contract for future platform adapters.
+
 ## M0: Headless Architecture
 
 Status: implemented and verified.
