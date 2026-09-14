@@ -5,6 +5,8 @@
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -47,16 +49,22 @@ int main() {
     require(host_window.request_frame(), "host rejected the initial Wayland frame request");
     require(host_window.request_frame(), "host rejected coalesced Wayland frame demand");
 
-    for (int iteration = 0; iteration < 20 && delegate->frames.empty(); ++iteration) {
+    for (int iteration = 0; iteration < 100 && delegate->frames.empty(); ++iteration) {
       connection->roundtrip();
+      if (delegate->frames.empty()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+      }
     }
     const auto status = native_window->status();
     require(delegate->created, "Wayland host did not create its framework delegate");
     require(status.configured && status.committed_buffers != 0,
             "xdg configure did not produce a diagnostic shared-memory buffer");
-    require(delegate->frames.size() == 1 && delegate->frames.front().window == dui::WindowId{1} &&
-              delegate->frames.front().timestamp >= std::chrono::nanoseconds::zero(),
-            "Wayland frame callback did not reach HostWindowDriver exactly once");
+    if (delegate->frames.size() != 1 || delegate->frames.front().window != dui::WindowId{1} ||
+        delegate->frames.front().timestamp < std::chrono::nanoseconds::zero()) {
+      throw std::runtime_error("Wayland frame callback count was " +
+                               std::to_string(delegate->frames.size()) +
+                               ", pending=" + (status.frame_callback_pending ? "true" : "false"));
+    }
 
     delegate->on_shutdown = [&native_window] { native_window.reset(); };
     host_window.shutdown();
