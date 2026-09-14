@@ -333,9 +333,26 @@ milliseconds and carry the matching host frame generation into
 detaches its host control before owner-thread native destruction so queued or
 reentrant shutdown work cannot retain a native owner. Headless Weston
 verifies initial configure, one diagnostic commit, coalesced frame demand, and
-host shutdown notification as H2 for this subset only. P1b.2b adds
-output/fractional scale, seat input, wakeable cross-thread dispatch, and
-recoverable surface recreation.
+host shutdown notification as H2 for this subset only.
+
+P1b.2b connects native output and fractional scaling without expanding into
+input or renderer ownership. The connection binds every `wl_output` through
+version 4, validates positive integer scale events, and keeps proxy addresses
+stable while a surface references them. `wl_surface.enter` and `leave` maintain
+the entered-output set; without both fractional-scale and viewporter globals,
+the effective fallback is the maximum scale of entered outputs, or one when the
+set is empty. Output scale changes and removal recompute that value. When both
+optional protocols exist, each window creates exactly one fractional-scale
+object and viewport. `preferred_scale` supersedes output integer scale, and
+fractional plans keep buffer scale one while setting viewport destination to the
+logical extent. Manager removal is deferred while child objects exist. Every
+scale transition invalidates stale P1a plans, repaints a correctly sized buffer,
+and publishes matching physical extent and device-pixel ratio through
+`HostWindowDriver`. Weston configured at scale two must verify the advertised
+protocol path, a 240/120 preferred scale, doubled physical dimensions, viewport
+use, frame delivery, and sanitizer-clean shutdown. P1b.3 adds seat capability,
+pointer, and keyboard/xkbcommon input. P1b.4 adds wakeable cross-thread dispatch,
+a framework-facing `RasterSurface`, and recoverable surface recreation.
 
 Implement the Wayland host first. The client performs an initial bufferless
 commit to trigger `xdg_surface.configure`, waits for configure, coalesces

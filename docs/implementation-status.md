@@ -193,9 +193,23 @@ control before owner-thread destruction of callbacks, buffers, and xdg/core
 surface objects, making queued or reentrant shutdown calls inert. The native
 window executable checks configure, diagnostic commit, coalesced demand
 producing one frame, delegate creation, and host shutdown notification under a
-real compositor. Output/fractional scale events, input, a framework-facing
-`RasterSurface`, cross-thread eventfd wakeup, and recoverable buffer recreation
-remain P1b.2b work.
+real compositor. Scaling follows in P1b.2b, input in P1b.3, and a
+framework-facing `RasterSurface`, cross-thread eventfd wakeup, and recoverable
+buffer recreation in P1b.4.
+
+## P1b.2b: Native Wayland Scaling
+
+Status: specified; implementation and native evidence pending.
+
+This slice binds stable per-output objects and drives integer fallback scale
+from the maximum scale of outputs currently entered by the surface. When both
+fractional-scale and viewporter are available, one protocol object of each kind
+belongs to the window; compositor preferred scale drives P1a plans with buffer
+scale one and viewport destination equal to logical extent. Scale transitions
+must repaint, publish physical metrics and device-pixel ratio, and preserve the
+single-frame-callback gate. A scale-two Weston run provides H2 for this subset.
+Seat input follows in P1b.3; wakeable cross-thread dispatch, `RasterSurface`, and
+recoverable native surface recreation follow in P1b.4.
 
 ## M0: Headless Architecture
 
