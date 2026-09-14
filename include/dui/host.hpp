@@ -64,6 +64,8 @@ enum class HostErrorSource {
   shutdown,
   accessibility,
   text_input,
+  clipboard,
+  cursor,
 };
 
 using HostErrorHandler = std::function<void(WindowId, HostErrorSource, std::exception_ptr)>;
@@ -101,6 +103,69 @@ struct TextInputServiceId {
   friend constexpr auto operator<=>(TextInputServiceId, TextInputServiceId) = default;
 };
 
+struct ClipboardServiceId {
+  std::uint64_t value{};
+
+  [[nodiscard]] constexpr bool valid() const noexcept { return value != 0; }
+  friend constexpr auto operator<=>(ClipboardServiceId, ClipboardServiceId) = default;
+};
+
+struct ClipboardRequestId {
+  ClipboardServiceId service;
+  std::uint64_t sequence{};
+
+  [[nodiscard]] constexpr bool valid() const noexcept { return service.valid() && sequence != 0; }
+  friend constexpr auto operator<=>(ClipboardRequestId, ClipboardRequestId) = default;
+};
+
+enum class ClipboardOperation { read_text, write_text };
+enum class ClipboardStatus { success, unavailable, denied, failed, canceled };
+
+struct ClipboardResult {
+  WindowId window;
+  ClipboardRequestId request;
+  ClipboardOperation operation{};
+  ClipboardStatus status{};
+  std::optional<std::string> text;
+
+  friend bool operator==(const ClipboardResult&, const ClipboardResult&) = default;
+};
+
+class ClipboardBackend {
+public:
+  virtual ~ClipboardBackend() = default;
+  virtual void read_text(ClipboardRequestId request) = 0;
+  virtual void write_text(ClipboardRequestId request, std::string_view text) = 0;
+};
+
+enum class SystemCursor {
+  system_default,
+  arrow,
+  text,
+  hand,
+  crosshair,
+  move,
+  not_allowed,
+  resize_horizontal,
+  resize_vertical,
+  resize_nwse,
+  resize_nesw,
+  hidden,
+};
+
+struct CursorServiceId {
+  std::uint64_t value{};
+
+  [[nodiscard]] constexpr bool valid() const noexcept { return value != 0; }
+  friend constexpr auto operator<=>(CursorServiceId, CursorServiceId) = default;
+};
+
+class CursorBackend {
+public:
+  virtual ~CursorBackend() = default;
+  virtual void set_cursor(SystemCursor cursor) = 0;
+};
+
 class HostWindowDelegate {
 public:
   virtual ~HostWindowDelegate() = default;
@@ -114,6 +179,7 @@ public:
   virtual void key_event(WindowId, KeyEvent) {}
   virtual void surface_changed(SurfaceEvent) {}
   virtual void semantics_action(WindowId, std::uint64_t, SemanticsAction) {}
+  virtual void clipboard_completed(ClipboardResult) {}
   virtual void close_requested(WindowId) {}
   virtual void window_shutting_down(WindowId) {}
 };
@@ -177,6 +243,9 @@ public:
   [[nodiscard]] bool publish_semantics(SemanticsTree tree);
   [[nodiscard]] bool clear_semantics();
   [[nodiscard]] bool retry_semantics() noexcept;
+  [[nodiscard]] std::optional<ClipboardRequestId> read_clipboard_text() noexcept;
+  [[nodiscard]] std::optional<ClipboardRequestId> write_clipboard_text(std::string text) noexcept;
+  [[nodiscard]] bool set_cursor(SystemCursor cursor) noexcept;
   void shutdown() noexcept;
 
 private:
@@ -211,6 +280,12 @@ public:
   set_accessibility_adapter(std::shared_ptr<AccessibilityAdapter> adapter) noexcept;
   [[nodiscard]] std::optional<TextInputServiceId>
   set_text_input_backend(std::shared_ptr<TextInputBackend> backend) noexcept;
+  [[nodiscard]] std::optional<ClipboardServiceId>
+  set_clipboard_backend(std::shared_ptr<ClipboardBackend> backend) noexcept;
+  [[nodiscard]] std::optional<CursorServiceId>
+  set_cursor_backend(std::shared_ptr<CursorBackend> backend) noexcept;
+  void complete_clipboard(ClipboardRequestId request, ClipboardStatus status,
+                          std::optional<std::string> text = std::nullopt) noexcept;
   void send_semantics_action(AccessibilityServiceId service, std::uint64_t node,
                              SemanticsAction action) noexcept;
   void request_framework_close() noexcept;

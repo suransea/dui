@@ -93,6 +93,31 @@ native-value retention across backend replacement, stale service and native-
 instance callbacks, update-failure recreation, explicit rectangle retry, client
 expiry, start retry, platform-post failure, and shutdown stop/release.
 
+### P0b.3: Host Clipboard And Cursor Services
+
+Status: H0 platform-neutral integration implemented and verified; native
+clipboard and pointer-icon runtime evidence remains platform-specific.
+
+Clipboard reads and writes receive unique request tokens containing the active
+service generation and a nonzero sequence. Native completion consumes exactly
+one outstanding request, validates status and UTF-8 read text, and posts an
+owned result to the current delegate generation. Backend replacement cancels
+all outstanding requests on the UI executor; delayed and duplicate completions
+are inert. Backend exceptions become failed completions, while task-post and
+counter-exhaustion failures stop the host rather than leaving unreachable work.
+
+Cursor commands retain desired and applied values and use one pending platform
+task. Values queued before execution coalesce, replacement reapplies the latest
+desired value, and a failed apply remains dirty for an explicit same-value
+retry without forming an automatic loop. Clipboard and cursor work is
+invalidated before the shutdown delegate notification, and both backends are
+released on the platform executor.
+
+Fake-host coverage includes concurrent read/write identity and ordering,
+malformed UTF-8, duplicate and stale completion, replacement cancellation,
+backend failure, cursor coalescing/retry/replacement, task-post failure, ordered
+shutdown cancellation, and platform-affine backend release.
+
 ## M0: Headless Architecture
 
 Status: implemented and verified.

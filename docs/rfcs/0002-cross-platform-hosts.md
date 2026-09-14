@@ -263,7 +263,16 @@ replacing them. It is delivered as three independently reviewed commits:
   executor.
 - P0b.3 adds generation-bearing clipboard requests and coalesced cursor
   commands, then integrates all service invalidation and platform-affine release
-  into host shutdown.
+  into host shutdown. Clipboard read/write requests use a nonzero
+  `(service-generation, sequence)` token. Completions must match one outstanding
+  request; duplicates and old-service results are inert, successful reads must
+  contain valid UTF-8, and replacement completes outstanding requests as
+  canceled on the UI executor. Cursor commands retain desired versus applied
+  state, discard queued intermediate values, permit one platform apply at a
+  time, and leave failure dirty so setting the same value explicitly retries.
+  Backend replacement reapplies the current desired cursor once. Shutdown
+  invalidates pending requests/tasks before delegate shutdown and releases both
+  backends on the platform executor.
 
 P0b.1 acceptance covers no-op preparation, owned deltas, acknowledgment,
 rejection, exact retry under a fresh generation, stale results, clear, reset,

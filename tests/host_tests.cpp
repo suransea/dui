@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstddef>
 #include <deque>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -182,6 +183,38 @@ public:
   std::vector<dui::TextInputAction> actions;
 };
 
+class RecordingClipboardBackend final : public dui::ClipboardBackend {
+public:
+  void read_text(dui::ClipboardRequestId request) override {
+    reads.push_back(request);
+    if (fail_read) {
+      fail_read = false;
+      throw std::runtime_error("clipboard read failed");
+    }
+  }
+  void write_text(dui::ClipboardRequestId request, std::string_view text) override {
+    writes.emplace_back(request, text);
+  }
+
+  std::vector<dui::ClipboardRequestId> reads;
+  std::vector<std::pair<dui::ClipboardRequestId, std::string>> writes;
+  bool fail_read{};
+};
+
+class RecordingCursorBackend final : public dui::CursorBackend {
+public:
+  void set_cursor(dui::SystemCursor cursor) override {
+    if (fail_next) {
+      fail_next = false;
+      throw std::runtime_error("cursor failed");
+    }
+    cursors.push_back(cursor);
+  }
+
+  std::vector<dui::SystemCursor> cursors;
+  bool fail_next{};
+};
+
 dui::SemanticsNode semantics_node(std::uint64_t id, std::string label) {
   return {id,
           dui::SemanticsRole::button,
@@ -242,6 +275,10 @@ public:
     semantics_actions.emplace_back(node, action);
     events.push_back("semantics:" + std::to_string(node));
   }
+  void clipboard_completed(dui::ClipboardResult result) override {
+    events.push_back("clipboard:" + std::to_string(result.request.sequence));
+    clipboard_results.push_back(std::move(result));
+  }
   void close_requested(dui::WindowId) override {
     events.push_back("close");
     if (throw_on_close) {
@@ -256,6 +293,7 @@ public:
   std::vector<dui::KeyEvent> keys;
   std::vector<dui::SurfaceEvent> surfaces;
   std::vector<std::pair<std::uint64_t, dui::SemanticsAction>> semantics_actions;
+  std::vector<dui::ClipboardResult> clipboard_results;
   dui::HostWindow* window{};
   bool request_followup{};
   bool throw_on_close{};
@@ -272,6 +310,7 @@ struct Rig {
   bool shutdown_on_error{};
   bool retry_on_accessibility_error{};
   std::optional<bool> accessibility_retry_result;
+  std::function<void(dui::HostErrorSource)> on_error;
   dui::HostWindowEndpoints endpoints;
 
   explicit Rig(bool visible = true)
@@ -285,6 +324,9 @@ struct Rig {
           }
           if (retry_on_accessibility_error && source == dui::HostErrorSource::accessibility) {
             accessibility_retry_result = endpoints.window.retry_semantics();
+          }
+          if (on_error) {
+            on_error(source);
           }
         })) {
     control->reentrant_window = &endpoints.window;
@@ -975,6 +1017,221 @@ void text_input_service_marshals_sessions_and_replacement() {
   post_failure.drain();
 }
 
+void clipboard_ui_post_failures_remain_cancelable() {
+  Rig completion_post_failure;
+  auto completion_delegate = std::make_shared<RecordingDelegate>();
+  auto completion_binding =
+    completion_post_failure.endpoints.window.bind_delegate(completion_delegate);
+  completion_post_failure.ui->run_all();
+  auto completion_backend = std::make_shared<RecordingClipboardBackend>();
+  static_cast<void>(
+    completion_post_failure.endpoints.driver.set_clipboard_backend(completion_backend));
+  const auto completion_request = completion_post_failure.endpoints.window.read_clipboard_text();
+  completion_post_failure.platform->run_all();
+  completion_post_failure.ui->fail_next_post = true;
+  completion_post_failure.endpoints.driver.complete_clipboard(
+    *completion_request, dui::ClipboardStatus::success, std::string{"completed"});
+  completion_post_failure.ui->run_all();
+  require(completion_delegate->clipboard_results.size() == 1 &&
+            completion_delegate->clipboard_results.front().request == *completion_request &&
+            completion_delegate->clipboard_results.front().status ==
+              dui::ClipboardStatus::canceled &&
+            completion_delegate->events.back() == "shutdown",
+          "failed completion delivery was not recovered as an ordered shutdown cancellation");
+  completion_post_failure.platform->run_all();
+
+  Rig replacement_post_failure;
+  auto replacement_delegate = std::make_shared<RecordingDelegate>();
+  auto replacement_binding =
+    replacement_post_failure.endpoints.window.bind_delegate(replacement_delegate);
+  replacement_post_failure.ui->run_all();
+  auto installed_backend = std::make_shared<RecordingClipboardBackend>();
+  static_cast<void>(
+    replacement_post_failure.endpoints.driver.set_clipboard_backend(installed_backend));
+  const auto replacement_request = replacement_post_failure.endpoints.window.read_clipboard_text();
+  replacement_post_failure.ui->fail_next_post = true;
+  require(!replacement_post_failure.endpoints.driver
+             .set_clipboard_backend(std::make_shared<RecordingClipboardBackend>())
+             .has_value(),
+          "replacement cancellation post failure did not fail service installation");
+  replacement_post_failure.ui->run_all();
+  require(replacement_delegate->clipboard_results.size() == 1 &&
+            replacement_delegate->clipboard_results.front().request == *replacement_request &&
+            replacement_delegate->clipboard_results.front().status ==
+              dui::ClipboardStatus::canceled &&
+            replacement_delegate->events.back() == "shutdown",
+          "failed replacement cancellation post was not recovered during shutdown");
+  replacement_post_failure.platform->run_all();
+
+  Rig request_reentrancy;
+  auto request_delegate = std::make_shared<RecordingDelegate>();
+  auto request_binding = request_reentrancy.endpoints.window.bind_delegate(request_delegate);
+  request_reentrancy.ui->run_all();
+  static_cast<void>(request_reentrancy.endpoints.driver.set_clipboard_backend(
+    std::make_shared<RecordingClipboardBackend>()));
+  request_reentrancy.on_error = [&](dui::HostErrorSource source) {
+    if (source == dui::HostErrorSource::task_post) {
+      static_cast<void>(request_reentrancy.endpoints.driver.set_clipboard_backend(
+        std::make_shared<RecordingClipboardBackend>()));
+    }
+  };
+  request_reentrancy.platform->fail_next_post = true;
+  require(!request_reentrancy.endpoints.window.read_clipboard_text().has_value(),
+          "failed request post unexpectedly returned a clipboard token");
+  request_reentrancy.ui->run_all();
+  require(request_delegate->clipboard_results.empty() &&
+            request_delegate->events.back() == "shutdown",
+          "error-handler replacement exposed a cancellation for an unreturned request token");
+  request_reentrancy.platform->run_all();
+
+  Rig replacement_reentrancy;
+  auto reentrant_delegate = std::make_shared<RecordingDelegate>();
+  auto reentrant_binding =
+    replacement_reentrancy.endpoints.window.bind_delegate(reentrant_delegate);
+  replacement_reentrancy.ui->run_all();
+  static_cast<void>(replacement_reentrancy.endpoints.driver.set_clipboard_backend(
+    std::make_shared<RecordingClipboardBackend>()));
+  const auto old_request = replacement_reentrancy.endpoints.window.read_clipboard_text();
+  std::optional<dui::ClipboardRequestId> reentrant_request;
+  replacement_reentrancy.on_error = [&](dui::HostErrorSource source) {
+    if (source == dui::HostErrorSource::task_post) {
+      reentrant_request = replacement_reentrancy.endpoints.window.read_clipboard_text();
+    }
+  };
+  replacement_reentrancy.ui->fail_next_post = true;
+  static_cast<void>(replacement_reentrancy.endpoints.driver.set_clipboard_backend(
+    std::make_shared<RecordingClipboardBackend>()));
+  replacement_reentrancy.ui->run_all();
+  require(reentrant_request.has_value() && reentrant_delegate->clipboard_results.size() == 2 &&
+            reentrant_delegate->clipboard_results[0].request == *old_request &&
+            reentrant_delegate->clipboard_results[1].request == *reentrant_request &&
+            reentrant_delegate->events.back() == "shutdown",
+          "replacement rollback lost a request created by the error handler");
+  replacement_reentrancy.platform->run_all();
+}
+
+void clipboard_and_cursor_services_are_generation_safe() {
+  Rig rig;
+  auto delegate = std::make_shared<RecordingDelegate>();
+  auto binding = rig.endpoints.window.bind_delegate(delegate);
+  rig.ui->run_all();
+
+  require(rig.endpoints.window.set_cursor(dui::SystemCursor::hand),
+          "cursor desired state was not retained before backend installation");
+  auto cursor = std::make_shared<RecordingCursorBackend>();
+  const auto cursor_service = rig.endpoints.driver.set_cursor_backend(cursor);
+  require(cursor_service.has_value() && cursor_service->valid(),
+          "cursor backend installation did not return a service generation");
+  require(rig.endpoints.window.set_cursor(dui::SystemCursor::arrow) &&
+            rig.endpoints.window.set_cursor(dui::SystemCursor::text),
+          "cursor commands were rejected");
+  rig.platform->run_all();
+  require(cursor->cursors == std::vector<dui::SystemCursor>{dui::SystemCursor::text},
+          "queued cursor values did not coalesce to the latest desired value");
+
+  cursor->fail_next = true;
+  require(rig.endpoints.window.set_cursor(dui::SystemCursor::hand),
+          "cursor failure setup was rejected");
+  rig.platform->run_all();
+  require(rig.errors.back() == dui::HostErrorSource::cursor && cursor->cursors.size() == 1 &&
+            rig.platform->pending_count() == 0,
+          "cursor failure was not contained without an automatic retry loop");
+  require(rig.endpoints.window.set_cursor(dui::SystemCursor::hand),
+          "same-value cursor retry was rejected");
+  rig.platform->run_all();
+  require(cursor->cursors.back() == dui::SystemCursor::hand,
+          "same-value cursor command did not retry a failed apply");
+
+  require(rig.endpoints.window.set_cursor(dui::SystemCursor::crosshair),
+          "cursor replacement setup was rejected");
+  auto replacement_cursor = std::make_shared<RecordingCursorBackend>();
+  const auto replacement_cursor_service =
+    rig.endpoints.driver.set_cursor_backend(replacement_cursor);
+  rig.platform->run_all();
+  require(replacement_cursor_service > cursor_service && cursor->cursors.size() == 2 &&
+            replacement_cursor->cursors ==
+              std::vector<dui::SystemCursor>{dui::SystemCursor::crosshair},
+          "cursor replacement did not discard the old task and reapply desired state once");
+
+  auto clipboard = std::make_shared<RecordingClipboardBackend>();
+  const auto clipboard_service = rig.endpoints.driver.set_clipboard_backend(clipboard);
+  const auto read = rig.endpoints.window.read_clipboard_text();
+  const auto write = rig.endpoints.window.write_clipboard_text("copied");
+  require(clipboard_service.has_value() && read.has_value() && write.has_value() &&
+            read->service == *clipboard_service && write->service == *clipboard_service &&
+            read->sequence != write->sequence,
+          "clipboard requests did not receive unique generation-bearing tokens");
+  rig.platform->run_all();
+  require(clipboard->reads == std::vector<dui::ClipboardRequestId>{*read} &&
+            clipboard->writes ==
+              std::vector<std::pair<dui::ClipboardRequestId, std::string>>{{*write, "copied"}},
+          "clipboard operations were not marshaled to the platform executor");
+
+  rig.endpoints.driver.complete_clipboard(*read, dui::ClipboardStatus::success,
+                                          std::string{"\x80"});
+  require(rig.errors.back() == dui::HostErrorSource::invalid_platform_event,
+          "malformed clipboard text was not rejected");
+  rig.endpoints.driver.complete_clipboard(*write, dui::ClipboardStatus::success);
+  rig.endpoints.driver.complete_clipboard(*read, dui::ClipboardStatus::success,
+                                          std::string{"pasted"});
+  rig.endpoints.driver.complete_clipboard(*read, dui::ClipboardStatus::failed);
+  rig.ui->run_all();
+  require(delegate->clipboard_results.size() == 2 &&
+            delegate->clipboard_results[0].request == *write &&
+            delegate->clipboard_results[1].text == std::optional<std::string>{"pasted"},
+          "clipboard completions were not validated, consumed once, and delivered in order");
+
+  const auto canceled = rig.endpoints.window.read_clipboard_text();
+  auto replacement_clipboard = std::make_shared<RecordingClipboardBackend>();
+  const auto replacement_clipboard_service =
+    rig.endpoints.driver.set_clipboard_backend(replacement_clipboard);
+  rig.platform->run_all();
+  rig.endpoints.driver.complete_clipboard(*canceled, dui::ClipboardStatus::success,
+                                          std::string{"stale"});
+  rig.ui->run_all();
+  require(replacement_clipboard_service > clipboard_service && clipboard->reads.size() == 1 &&
+            delegate->clipboard_results.back().request == *canceled &&
+            delegate->clipboard_results.back().status == dui::ClipboardStatus::canceled,
+          "clipboard replacement did not cancel pending work and reject stale completion");
+
+  replacement_clipboard->fail_read = true;
+  const auto failed = rig.endpoints.window.read_clipboard_text();
+  rig.platform->run_all();
+  rig.ui->run_all();
+  require(delegate->clipboard_results.back().request == *failed &&
+            delegate->clipboard_results.back().status == dui::ClipboardStatus::failed &&
+            rig.errors.back() == dui::HostErrorSource::clipboard,
+          "clipboard backend exception did not produce a failed completion");
+
+  const auto shutdown_request = rig.endpoints.window.read_clipboard_text();
+  std::weak_ptr<RecordingClipboardBackend> weak_clipboard = replacement_clipboard;
+  std::weak_ptr<RecordingCursorBackend> weak_cursor = replacement_cursor;
+  clipboard.reset();
+  cursor.reset();
+  replacement_clipboard.reset();
+  replacement_cursor.reset();
+  rig.endpoints.window.shutdown();
+  rig.ui->run_all();
+  require(delegate->clipboard_results.back().request == *shutdown_request &&
+            delegate->clipboard_results.back().status == dui::ClipboardStatus::canceled &&
+            delegate->events.back() == "shutdown" && !weak_clipboard.expired() &&
+            !weak_cursor.expired(),
+          "shutdown did not cancel clipboard work before notification or retained services early");
+  rig.platform->run_all();
+  require(weak_clipboard.expired() && weak_cursor.expired(),
+          "clipboard/cursor backends were not released on the platform executor");
+
+  Rig post_failure;
+  auto failed_backend = std::make_shared<RecordingClipboardBackend>();
+  static_cast<void>(post_failure.endpoints.driver.set_clipboard_backend(failed_backend));
+  post_failure.platform->fail_next_post = true;
+  require(!post_failure.endpoints.window.read_clipboard_text().has_value() &&
+            !post_failure.endpoints.window.valid() &&
+            post_failure.errors.back() == dui::HostErrorSource::task_post,
+          "clipboard platform-post failure did not stop the host");
+  post_failure.drain();
+}
+
 void raster_surface_identity_remains_the_existing_boundary() {
   Rig rig;
   require(rig.endpoints.window.raster_surface() == rig.surface,
@@ -1005,6 +1262,8 @@ int main() {
     shutdown_is_ordered_idempotent_and_invalidates_endpoints();
     accessibility_service_publishes_retries_and_replaces();
     text_input_service_marshals_sessions_and_replacement();
+    clipboard_and_cursor_services_are_generation_safe();
+    clipboard_ui_post_failures_remain_cancelable();
     raster_surface_identity_remains_the_existing_boundary();
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';

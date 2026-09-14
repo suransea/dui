@@ -142,6 +142,10 @@ It also exposes an existing-API-compatible text-input proxy that marshals public
 sessions, full editing values, geometry, native callbacks, backend replacement,
 and shutdown across the UI and platform executors without exposing native
 session IDs.
+Generation-bearing asynchronous clipboard reads/writes and coalesced system
+cursor commands complete the H0 service contract. Replacement cancels old
+clipboard requests, reapplies the retained cursor, rejects stale callbacks, and
+keeps backend release on the platform executor.
 
 The native roadmap targets Linux, Android, macOS, iOS, and Windows through one
 shared host contract. Linux/Wayland is the first executable reference integration;

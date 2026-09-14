@@ -24,6 +24,11 @@ struct HostTextSession {
   std::uint64_t rect_revision{};
 };
 
+struct PendingClipboardRequest {
+  ClipboardRequestId id;
+  ClipboardOperation operation{};
+};
+
 struct HostWindowState {
   mutable std::recursive_mutex dispatch_mutex;
   mutable std::mutex mutex;
@@ -75,6 +80,17 @@ struct HostWindowState {
   std::uint64_t native_text_value_revision{};
   std::uint64_t native_text_rect_revision{};
   bool text_sync_pending{};
+  std::shared_ptr<ClipboardBackend> clipboard_backend;
+  std::uint64_t clipboard_service_generation{};
+  std::uint64_t clipboard_next_sequence{1};
+  std::vector<PendingClipboardRequest> clipboard_requests;
+  std::shared_ptr<CursorBackend> cursor_backend;
+  SystemCursor desired_cursor{SystemCursor::system_default};
+  std::optional<SystemCursor> applied_cursor;
+  std::uint64_t cursor_service_generation{};
+  std::uint64_t cursor_revision{};
+  std::uint64_t cursor_pending_service{};
+  bool cursor_sync_pending{};
   HostErrorHandler error_handler;
 };
 
@@ -284,6 +300,8 @@ void complete_platform_shutdown(const std::shared_ptr<State>& state) noexcept {
   std::shared_ptr<TextInputBackend> text_backend;
   std::shared_ptr<TextInputBackend> native_text_backend;
   TextInputSessionId native_text_session{};
+  std::shared_ptr<ClipboardBackend> clipboard_backend;
+  std::shared_ptr<CursorBackend> cursor_backend;
   {
     std::lock_guard lock{state->mutex};
     if (state->platform_shutdown_complete) {
@@ -297,6 +315,8 @@ void complete_platform_shutdown(const std::shared_ptr<State>& state) noexcept {
     native_text_backend = std::move(state->native_text_backend);
     native_text_session = std::exchange(state->native_text_session, 0);
     state->native_text_client.reset();
+    clipboard_backend = std::move(state->clipboard_backend);
+    cursor_backend = std::move(state->cursor_backend);
   }
   if (native_text_backend != nullptr && native_text_session != 0) {
     try {
@@ -308,6 +328,8 @@ void complete_platform_shutdown(const std::shared_ptr<State>& state) noexcept {
   native_text_backend.reset();
   text_backend.reset();
   accessibility_adapter.reset();
+  clipboard_backend.reset();
+  cursor_backend.reset();
   try {
     control->cancel_frame();
   } catch (...) {
@@ -768,6 +790,149 @@ void ForwardingTextInputClient::perform_action(TextInputAction action) {
   }
 }
 
+bool valid_cursor(SystemCursor cursor) {
+  switch (cursor) {
+  case SystemCursor::system_default:
+  case SystemCursor::arrow:
+  case SystemCursor::text:
+  case SystemCursor::hand:
+  case SystemCursor::crosshair:
+  case SystemCursor::move:
+  case SystemCursor::not_allowed:
+  case SystemCursor::resize_horizontal:
+  case SystemCursor::resize_vertical:
+  case SystemCursor::resize_nwse:
+  case SystemCursor::resize_nesw:
+  case SystemCursor::hidden:
+    return true;
+  }
+  return false;
+}
+
+bool schedule_cursor_sync(const std::shared_ptr<State>& state) noexcept {
+  std::weak_ptr<CursorBackend> backend;
+  std::uint64_t service{};
+  {
+    std::lock_guard lock{state->mutex};
+    if (!state->running || state->cursor_backend == nullptr || state->cursor_sync_pending ||
+        state->applied_cursor == state->desired_cursor) {
+      return true;
+    }
+    backend = state->cursor_backend;
+    service = state->cursor_service_generation;
+    state->cursor_sync_pending = true;
+    state->cursor_pending_service = service;
+  }
+  if (!post_task(state, state->platform_runner.lock(), [state, backend, service] {
+        std::shared_ptr<CursorBackend> current_backend;
+        SystemCursor cursor;
+        std::uint64_t revision{};
+        {
+          std::lock_guard lock{state->mutex};
+          current_backend = backend.lock();
+          if (!state->running || current_backend == nullptr ||
+              state->cursor_backend != current_backend ||
+              state->cursor_service_generation != service) {
+            return;
+          }
+          cursor = state->desired_cursor;
+          revision = state->cursor_revision;
+        }
+        bool succeeded{};
+        try {
+          current_backend->set_cursor(cursor);
+          succeeded = true;
+        } catch (...) {
+          report_error(state, HostErrorSource::cursor, std::current_exception());
+        }
+        bool schedule_newer{};
+        {
+          std::lock_guard lock{state->mutex};
+          if (state->cursor_backend != current_backend ||
+              state->cursor_service_generation != service ||
+              state->cursor_pending_service != service) {
+            return;
+          }
+          state->cursor_sync_pending = false;
+          state->cursor_pending_service = 0;
+          if (succeeded) {
+            state->applied_cursor = cursor;
+            schedule_newer = state->running && state->desired_cursor != cursor;
+          } else {
+            schedule_newer = state->running && state->cursor_revision != revision;
+          }
+        }
+        if (schedule_newer) {
+          static_cast<void>(schedule_cursor_sync(state));
+        }
+      })) {
+    {
+      std::lock_guard lock{state->mutex};
+      if (state->cursor_service_generation == service && state->cursor_pending_service == service) {
+        state->cursor_sync_pending = false;
+        state->cursor_pending_service = 0;
+      }
+    }
+    detail::shutdown_host_window(state);
+    return false;
+  }
+  return true;
+}
+
+void complete_clipboard_request(const std::shared_ptr<State>& state, ClipboardRequestId request,
+                                ClipboardStatus status, std::optional<std::string> text) noexcept {
+  std::lock_guard dispatch_lock{state->dispatch_mutex};
+  ClipboardOperation operation{};
+  std::uint64_t delegate_generation{};
+  WindowId id;
+  bool invalid{};
+  {
+    std::lock_guard lock{state->mutex};
+    const auto pending =
+      std::ranges::find(state->clipboard_requests, request, &detail::PendingClipboardRequest::id);
+    if (!state->running || pending == state->clipboard_requests.end() ||
+        state->clipboard_service_generation != request.service.value) {
+      return;
+    }
+    operation = pending->operation;
+    const bool valid_status =
+      status == ClipboardStatus::success || status == ClipboardStatus::unavailable ||
+      status == ClipboardStatus::denied || status == ClipboardStatus::failed ||
+      status == ClipboardStatus::canceled;
+    invalid =
+      !request.valid() || !valid_status ||
+      (operation == ClipboardOperation::read_text && status == ClipboardStatus::success &&
+       (!text.has_value() || !is_valid_utf8(*text))) ||
+      ((operation == ClipboardOperation::write_text || status != ClipboardStatus::success) &&
+       text.has_value());
+    if (!invalid) {
+      delegate_generation = state->delegate_generation;
+      id = state->id;
+    }
+  }
+  if (invalid) {
+    report_error(state, HostErrorSource::invalid_platform_event,
+                 std::make_exception_ptr(std::invalid_argument("Invalid clipboard completion")));
+    return;
+  }
+  ClipboardResult result{id, request, operation, status, std::move(text)};
+  std::exception_ptr failure = try_post_task(
+    state->ui_runner.lock(), [state, delegate_generation, result = std::move(result)]() mutable {
+      invoke_delegate(state, delegate_generation,
+                      [result = std::move(result)](HostWindowDelegate& delegate) mutable {
+                        delegate.clipboard_completed(std::move(result));
+                      });
+    });
+  if (failure != nullptr) {
+    report_error(state, HostErrorSource::task_post, std::move(failure));
+    detail::shutdown_host_window(state);
+    return;
+  }
+  std::lock_guard lock{state->mutex};
+  std::erase_if(state->clipboard_requests,
+                [request](const auto& pending) { return pending.id == request; });
+}
+
 bool same_metrics(const WindowMetrics& current, Size logical_size, std::uint32_t physical_width,
                   std::uint32_t physical_height, double device_pixel_ratio) {
   return current.logical_size == logical_size && current.physical_width == physical_width &&
@@ -1117,12 +1282,170 @@ bool HostWindow::retry_semantics() noexcept {
   return true;
 }
 
+std::optional<ClipboardRequestId> HostWindow::read_clipboard_text() noexcept {
+  if (state_ == nullptr) {
+    return std::nullopt;
+  }
+  std::lock_guard dispatch_lock{state_->dispatch_mutex};
+  ClipboardRequestId request;
+  std::weak_ptr<ClipboardBackend> backend;
+  std::exception_ptr failure;
+  {
+    std::lock_guard lock{state_->mutex};
+    if (!state_->running || state_->clipboard_backend == nullptr) {
+      return std::nullopt;
+    }
+    if (state_->clipboard_next_sequence == std::numeric_limits<std::uint64_t>::max()) {
+      failure =
+        std::make_exception_ptr(std::overflow_error("Clipboard request sequence exhausted"));
+    } else {
+      request = {{state_->clipboard_service_generation}, state_->clipboard_next_sequence++};
+      backend = state_->clipboard_backend;
+      try {
+        state_->clipboard_requests.push_back({request, ClipboardOperation::read_text});
+      } catch (...) {
+        failure = std::current_exception();
+      }
+    }
+  }
+  if (failure != nullptr) {
+    report_error(state_, HostErrorSource::clipboard, std::move(failure));
+    shutdown();
+    return std::nullopt;
+  }
+  failure = try_post_task(state_->platform_runner.lock(), [state = state_, backend, request] {
+    std::shared_ptr<ClipboardBackend> current_backend;
+    {
+      std::lock_guard lock{state->mutex};
+      current_backend = backend.lock();
+      const auto pending =
+        std::ranges::find(state->clipboard_requests, request, &detail::PendingClipboardRequest::id);
+      if (!state->running || current_backend == nullptr ||
+          state->clipboard_backend != current_backend ||
+          state->clipboard_service_generation != request.service.value ||
+          pending == state->clipboard_requests.end()) {
+        return;
+      }
+    }
+    try {
+      current_backend->read_text(request);
+    } catch (...) {
+      report_error(state, HostErrorSource::clipboard, std::current_exception());
+      complete_clipboard_request(state, request, ClipboardStatus::failed, std::nullopt);
+    }
+  });
+  if (failure != nullptr) {
+    {
+      std::lock_guard lock{state_->mutex};
+      std::erase_if(state_->clipboard_requests,
+                    [request](const auto& pending) { return pending.id == request; });
+    }
+    report_error(state_, HostErrorSource::task_post, std::move(failure));
+    shutdown();
+    return std::nullopt;
+  }
+  return request;
+}
+
+std::optional<ClipboardRequestId> HostWindow::write_clipboard_text(std::string text) noexcept {
+  if (state_ == nullptr || !is_valid_utf8(text)) {
+    return std::nullopt;
+  }
+  std::lock_guard dispatch_lock{state_->dispatch_mutex};
+  ClipboardRequestId request;
+  std::weak_ptr<ClipboardBackend> backend;
+  std::exception_ptr failure;
+  {
+    std::lock_guard lock{state_->mutex};
+    if (!state_->running || state_->clipboard_backend == nullptr) {
+      return std::nullopt;
+    }
+    if (state_->clipboard_next_sequence == std::numeric_limits<std::uint64_t>::max()) {
+      failure =
+        std::make_exception_ptr(std::overflow_error("Clipboard request sequence exhausted"));
+    } else {
+      request = {{state_->clipboard_service_generation}, state_->clipboard_next_sequence++};
+      backend = state_->clipboard_backend;
+      try {
+        state_->clipboard_requests.push_back({request, ClipboardOperation::write_text});
+      } catch (...) {
+        failure = std::current_exception();
+      }
+    }
+  }
+  if (failure != nullptr) {
+    report_error(state_, HostErrorSource::clipboard, std::move(failure));
+    shutdown();
+    return std::nullopt;
+  }
+  failure = try_post_task(state_->platform_runner.lock(), [state = state_, backend, request,
+                                                           text = std::move(text)] {
+    std::shared_ptr<ClipboardBackend> current_backend;
+    {
+      std::lock_guard lock{state->mutex};
+      current_backend = backend.lock();
+      const auto pending =
+        std::ranges::find(state->clipboard_requests, request, &detail::PendingClipboardRequest::id);
+      if (!state->running || current_backend == nullptr ||
+          state->clipboard_backend != current_backend ||
+          state->clipboard_service_generation != request.service.value ||
+          pending == state->clipboard_requests.end()) {
+        return;
+      }
+    }
+    try {
+      current_backend->write_text(request, text);
+    } catch (...) {
+      report_error(state, HostErrorSource::clipboard, std::current_exception());
+      complete_clipboard_request(state, request, ClipboardStatus::failed, std::nullopt);
+    }
+  });
+  if (failure != nullptr) {
+    {
+      std::lock_guard lock{state_->mutex};
+      std::erase_if(state_->clipboard_requests,
+                    [request](const auto& pending) { return pending.id == request; });
+    }
+    report_error(state_, HostErrorSource::task_post, std::move(failure));
+    shutdown();
+    return std::nullopt;
+  }
+  return request;
+}
+
+bool HostWindow::set_cursor(SystemCursor cursor) noexcept {
+  if (state_ == nullptr || !valid_cursor(cursor)) {
+    return false;
+  }
+  bool exhausted{};
+  {
+    std::lock_guard lock{state_->mutex};
+    if (!state_->running) {
+      return false;
+    }
+    if (state_->cursor_revision == std::numeric_limits<std::uint64_t>::max()) {
+      exhausted = true;
+    } else {
+      state_->desired_cursor = cursor;
+      ++state_->cursor_revision;
+    }
+  }
+  if (exhausted) {
+    report_error(state_, HostErrorSource::cursor,
+                 std::make_exception_ptr(std::overflow_error("Cursor revision exhausted")));
+    shutdown();
+    return false;
+  }
+  return schedule_cursor_sync(state_);
+}
+
 void HostWindow::shutdown() noexcept {
   if (state_ == nullptr) {
     return;
   }
   std::lock_guard dispatch_lock{state_->dispatch_mutex};
   std::vector<PointerId> pointers;
+  std::vector<detail::PendingClipboardRequest> clipboard_requests;
   WindowId id;
   std::uint64_t delegate_generation{};
   bool retry_platform{};
@@ -1137,6 +1460,9 @@ void HostWindow::shutdown() noexcept {
       state_->frame_armed = false;
       state_->text_session.reset();
       state_->text_sync_pending = false;
+      clipboard_requests = std::move(state_->clipboard_requests);
+      state_->cursor_sync_pending = false;
+      state_->cursor_pending_service = 0;
       if (state_->frame_generation != std::numeric_limits<std::uint64_t>::max()) {
         ++state_->frame_generation;
       }
@@ -1154,7 +1480,8 @@ void HostWindow::shutdown() noexcept {
   }
   const bool posted =
     post_task(state_, state_->ui_runner.lock(),
-              [state = state_, delegate_generation, pointers = std::move(pointers), id]() mutable {
+              [state = state_, delegate_generation, pointers = std::move(pointers),
+               clipboard_requests = std::move(clipboard_requests), id]() mutable {
                 state->accessibility_bridge.reset_acknowledged();
                 {
                   std::lock_guard lock{state->mutex};
@@ -1164,6 +1491,15 @@ void HostWindow::shutdown() noexcept {
                   state->accessibility_retry_requested = false;
                   state->accessibility_publication = 0;
                   state->accessibility_publication_service = 0;
+                }
+                for (const auto& pending : clipboard_requests) {
+                  invoke_delegate(
+                    state, delegate_generation,
+                    [id, pending](HostWindowDelegate& delegate) {
+                      delegate.clipboard_completed({id, pending.id, pending.operation,
+                                                    ClipboardStatus::canceled, std::nullopt});
+                    },
+                    false);
                 }
                 for (PointerId pointer : pointers) {
                   invoke_delegate(
@@ -1745,6 +2081,121 @@ HostWindowDriver::set_text_input_backend(std::shared_ptr<TextInputBackend> backe
     return std::nullopt;
   }
   return service;
+}
+
+std::optional<ClipboardServiceId>
+HostWindowDriver::set_clipboard_backend(std::shared_ptr<ClipboardBackend> backend) noexcept {
+  const std::shared_ptr<State> state = state_.lock();
+  if (state == nullptr) {
+    return std::nullopt;
+  }
+  std::lock_guard dispatch_lock{state->dispatch_mutex};
+  ClipboardServiceId service;
+  std::shared_ptr<ClipboardBackend> previous;
+  std::shared_ptr<std::vector<detail::PendingClipboardRequest>> canceled;
+  try {
+    canceled = std::make_shared<std::vector<detail::PendingClipboardRequest>>();
+  } catch (...) {
+    report_error(state, HostErrorSource::clipboard, std::current_exception());
+    detail::shutdown_host_window(state);
+    return std::nullopt;
+  }
+  std::uint64_t delegate_generation{};
+  WindowId id;
+  bool exhausted{};
+  {
+    std::lock_guard lock{state->mutex};
+    if (!state->running) {
+      return std::nullopt;
+    }
+    if (state->clipboard_service_generation == std::numeric_limits<std::uint64_t>::max()) {
+      exhausted = true;
+    } else {
+      service = {++state->clipboard_service_generation};
+      previous = std::move(state->clipboard_backend);
+      state->clipboard_backend = std::move(backend);
+      *canceled = std::move(state->clipboard_requests);
+      delegate_generation = state->delegate_generation;
+      id = state->id;
+    }
+  }
+  previous.reset();
+  if (exhausted) {
+    report_error(
+      state, HostErrorSource::clipboard,
+      std::make_exception_ptr(std::overflow_error("Clipboard service generation exhausted")));
+    detail::shutdown_host_window(state);
+    return std::nullopt;
+  }
+  std::exception_ptr failure;
+  if (!canceled->empty()) {
+    failure = try_post_task(state->ui_runner.lock(), [state, canceled, delegate_generation, id] {
+      for (const auto& pending : *canceled) {
+        invoke_delegate(state, delegate_generation, [id, pending](HostWindowDelegate& delegate) {
+          delegate.clipboard_completed(
+            {id, pending.id, pending.operation, ClipboardStatus::canceled, std::nullopt});
+        });
+      }
+    });
+  }
+  if (failure != nullptr) {
+    {
+      std::lock_guard lock{state->mutex};
+      state->clipboard_requests = std::move(*canceled);
+    }
+    report_error(state, HostErrorSource::task_post, std::move(failure));
+    detail::shutdown_host_window(state);
+    return std::nullopt;
+  }
+  return service;
+}
+
+std::optional<CursorServiceId>
+HostWindowDriver::set_cursor_backend(std::shared_ptr<CursorBackend> backend) noexcept {
+  const std::shared_ptr<State> state = state_.lock();
+  if (state == nullptr) {
+    return std::nullopt;
+  }
+  std::lock_guard dispatch_lock{state->dispatch_mutex};
+  CursorServiceId service;
+  std::shared_ptr<CursorBackend> previous;
+  bool exhausted{};
+  {
+    std::lock_guard lock{state->mutex};
+    if (!state->running) {
+      return std::nullopt;
+    }
+    if (state->cursor_service_generation == std::numeric_limits<std::uint64_t>::max()) {
+      exhausted = true;
+    } else {
+      service = {++state->cursor_service_generation};
+      previous = std::move(state->cursor_backend);
+      state->cursor_backend = std::move(backend);
+      state->applied_cursor.reset();
+      state->cursor_sync_pending = false;
+      state->cursor_pending_service = 0;
+    }
+  }
+  previous.reset();
+  if (exhausted) {
+    report_error(
+      state, HostErrorSource::cursor,
+      std::make_exception_ptr(std::overflow_error("Cursor service generation exhausted")));
+    detail::shutdown_host_window(state);
+    return std::nullopt;
+  }
+  if (!schedule_cursor_sync(state)) {
+    return std::nullopt;
+  }
+  return service;
+}
+
+void HostWindowDriver::complete_clipboard(ClipboardRequestId request, ClipboardStatus status,
+                                          std::optional<std::string> text) noexcept {
+  const std::shared_ptr<State> state = state_.lock();
+  if (state != nullptr) {
+    complete_clipboard_request(state, request, status, std::move(text));
+  }
 }
 
 void HostWindowDriver::send_semantics_action(AccessibilityServiceId service, std::uint64_t node,
