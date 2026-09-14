@@ -274,6 +274,15 @@ struct SemanticsUpdate {
   friend bool operator==(const SemanticsUpdate&, const SemanticsUpdate&) = default;
 };
 
+struct AccessibilityPublication {
+  std::uint64_t generation{};
+  SemanticsUpdate update;
+
+  [[nodiscard]] bool valid() const { return generation != 0 && !update.empty(); }
+  friend bool operator==(const AccessibilityPublication&,
+                         const AccessibilityPublication&) = default;
+};
+
 class SemanticsDiffer {
 public:
   [[nodiscard]] SemanticsUpdate update(const SemanticsTree& tree);
@@ -306,7 +315,13 @@ public:
 
   [[nodiscard]] bool publish(const SemanticsTree& tree, AccessibilityAdapter& adapter);
   [[nodiscard]] bool clear(AccessibilityAdapter& adapter);
-  // Invalidated by a successful non-empty publish or clear.
+  [[nodiscard]] std::optional<AccessibilityPublication> prepare(const SemanticsTree& tree);
+  [[nodiscard]] std::optional<AccessibilityPublication> prepare_clear();
+  [[nodiscard]] std::optional<AccessibilityPublication> retry();
+  [[nodiscard]] bool acknowledge(std::uint64_t generation) noexcept;
+  [[nodiscard]] bool reject(std::uint64_t generation) noexcept;
+  void reset_acknowledged();
+  // Invalidated by a successful publish/clear, acknowledgment, or reset.
   [[nodiscard]] std::span<const SemanticsEntry> entries() const { return differ_.entries(); }
 
 private:
@@ -315,8 +330,21 @@ private:
     bool delivering{};
   };
 
+  struct Transaction {
+    std::uint64_t generation{};
+    SemanticsDiffer candidate;
+    SemanticsUpdate update;
+    bool in_flight{};
+  };
+
+  [[nodiscard]] std::optional<AccessibilityPublication> begin_transaction(SemanticsDiffer candidate,
+                                                                          SemanticsUpdate update);
+  [[nodiscard]] std::uint64_t next_publication_generation();
+
   SemanticsDiffer differ_;
   std::shared_ptr<DeliveryState> delivery_state_;
+  std::optional<Transaction> transaction_;
+  std::uint64_t next_generation_{1};
 };
 
 struct HitTestEntry {

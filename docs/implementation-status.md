@@ -24,6 +24,25 @@ continuing without the corresponding event. The existing `Backend`/`NativeView`
 types remain a temporary raster-test compatibility seam; `HostWindow` is the
 native lifecycle contract for future platform adapters.
 
+### P0b.1: Asynchronous Accessibility Transactions
+
+Status: implemented and verified as a platform-neutral prerequisite; host
+service/executor integration remains in P0b.2.
+
+`AccessibilityBridge` can now prepare an owned, generation-tagged semantics
+publication without advancing its acknowledged entries. Only a matching
+in-flight acknowledgment commits the candidate. Rejection retains the exact
+batch for explicit retry under a fresh generation, stale results are inert, and
+reset invalidates pending work while returning acknowledgment to an empty native
+model. Existing synchronous publish/clear behavior remains available and cannot
+be mixed with a pending asynchronous transaction.
+
+Semantics tests cover initial and no-op preparation, detached ownership, strict
+generation growth, stale/duplicate results, reject/retry, child-first clear and
+retry, reset invalidation, malformed-tree transactionality, and synchronous/
+asynchronous exclusion. Separate platform/UI runner delivery, adapter
+replacement, actions, and shutdown are intentionally deferred to P0b.2.
+
 ## M0: Headless Architecture
 
 Status: implemented and verified.

@@ -638,6 +638,75 @@ void accessibility_bridge_acknowledges_successful_delivery() {
           "bridge destruction during failed clear caused unsafe exception handling");
 }
 
+void accessibility_bridge_supports_owned_async_transactions() {
+  dui::AccessibilityBridge bridge;
+  dui::SemanticsTree first{{node(30, "first", {node(31, "child")})}};
+  const auto initial = bridge.prepare(first);
+  require(initial.has_value() && initial->valid() && initial->update.changes.size() == 2 &&
+            bridge.entries().empty(),
+          "async prepare did not retain acknowledgment or produce an owned initial delta");
+  first.roots.front().label = "mutated source";
+  require(initial->update.changes.front().entry.label == "first",
+          "prepared accessibility publication retained the source tree");
+
+  RecordingAccessibilityAdapter adapter;
+  bool second_prepare_rejected = false;
+  bool synchronous_publish_rejected = false;
+  try {
+    static_cast<void>(bridge.prepare({{node(32, "second")}}));
+  } catch (const std::logic_error&) {
+    second_prepare_rejected = true;
+  }
+  try {
+    static_cast<void>(bridge.publish({{node(32, "second")}}, adapter));
+  } catch (const std::logic_error&) {
+    synchronous_publish_rejected = true;
+  }
+  require(second_prepare_rejected && synchronous_publish_rejected &&
+            !bridge.acknowledge(initial->generation + 1),
+          "bridge mixed a pending async transaction or accepted a stale acknowledgment");
+
+  require(bridge.reject(initial->generation) && !bridge.reject(initial->generation) &&
+            bridge.entries().empty(),
+          "async rejection advanced acknowledgment or accepted a duplicate result");
+  const auto retry = bridge.retry();
+  require(retry.has_value() && retry->generation > initial->generation &&
+            retry->update == initial->update && !bridge.acknowledge(initial->generation) &&
+            bridge.acknowledge(retry->generation) && bridge.entries().size() == 2 &&
+            bridge.entries().front().label == "first",
+          "async retry changed its delta or accepted the wrong publication generation");
+  require(!bridge.prepare({{node(30, "first", {node(31, "child")})}}).has_value(),
+          "async prepare emitted an unchanged acknowledged tree");
+
+  const auto clear = bridge.prepare_clear();
+  require(clear.has_value() && clear->update.changes.size() == 2 &&
+            clear->update.changes.front().entry.id == 31 && bridge.reject(clear->generation),
+          "async clear was not child-first or could not be rejected");
+  const auto clear_retry = bridge.retry();
+  require(clear_retry.has_value() && clear_retry->generation > clear->generation &&
+            clear_retry->update == clear->update && bridge.acknowledge(clear_retry->generation) &&
+            bridge.entries().empty(),
+          "async clear retry did not commit the retained removal batch");
+
+  const auto reset_candidate = bridge.prepare({{node(40, "reset")}});
+  require(reset_candidate.has_value(), "reset test could not prepare a publication");
+  bridge.reset_acknowledged();
+  require(!bridge.acknowledge(reset_candidate->generation) && bridge.entries().empty(),
+          "reset did not invalidate an in-flight publication");
+
+  require(bridge.acknowledge(0) == false && bridge.reject(0) == false &&
+            !bridge.retry().has_value(),
+          "empty async bridge accepted a result or exposed a retry");
+  bool malformed_rejected = false;
+  try {
+    static_cast<void>(bridge.prepare({{node(41, "duplicate"), node(41, "duplicate")}}));
+  } catch (const std::logic_error&) {
+    malformed_rejected = true;
+  }
+  require(malformed_rejected && bridge.entries().empty() && !bridge.retry().has_value(),
+          "malformed async publication changed acknowledged or retry state");
+}
+
 } // namespace
 
 int main() {
@@ -649,6 +718,7 @@ int main() {
     render_owner_rejects_semantics_without_current_layout();
     semantics_differ_emits_deterministic_transactional_updates();
     accessibility_bridge_acknowledges_successful_delivery();
+    accessibility_bridge_supports_owned_async_transactions();
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';
     return EXIT_FAILURE;

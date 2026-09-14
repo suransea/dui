@@ -228,12 +228,33 @@ have moved behind the host/raster boundary.
 P0b adds generation-safe text-input marshaling, owned asynchronous semantics
 publication with acknowledgment/retry, clipboard requests, and cursor commands.
 It adapts the existing `TextInputBackend` and `AccessibilityBridge` rather than
-replacing them. Text updates received before native start coalesce; replacement
-and stop invalidate stale sessions. At most one semantics publication is in
-flight, adapter failure retains the last acknowledged tree, and explicit retry
-replays the complete delta. P0b acceptance adds service replacement, stale
-callback, failure/retry, and shutdown tests without emulating an IME or native
-accessibility client.
+replacing them. It is delivered as three independently reviewed commits:
+
+- P0b.1 extends `AccessibilityBridge` with UI-executor `prepare`, `prepare_clear`,
+  `acknowledge`, `reject`, `retry`, and `reset_acknowledged` transactions. A
+  prepared `AccessibilityPublication` owns its complete change batch and a
+  nonzero generation. Preparation does not advance acknowledged entries; only a
+  matching in-flight acknowledgment commits the candidate. Rejection retains
+  the exact candidate and batch, while retry copies that batch under a fresh
+  generation so a delayed old acknowledgment remains stale. Only one
+  transaction may exist, and synchronous and asynchronous delivery cannot be
+  mixed while it is pending.
+- P0b.2 attaches optional text-input and accessibility services to the host
+  coordinator. Text updates received before native start coalesce; replacement
+  and stop invalidate stale sessions. At most one semantics publication is in
+  flight; platform success/failure posts a generation-tagged result to the UI
+  executor, adapter replacement resets acknowledgment to empty, and native
+  semantics actions post back through the current delegate generation.
+- P0b.3 adds generation-bearing clipboard requests and coalesced cursor
+  commands, then integrates all service invalidation and platform-affine release
+  into host shutdown.
+
+P0b.1 acceptance covers no-op preparation, owned deltas, acknowledgment,
+rejection, exact retry under a fresh generation, stale results, clear, reset,
+malformed-tree transactionality, generation ordering, and rejection of mixed
+synchronous/asynchronous delivery. P0b.2 and P0b.3 add service replacement,
+stale callback, failure/retry, executor ordering, and shutdown tests without
+emulating an IME or native accessibility client.
 
 ### P1: Linux Reference Host Integration
 

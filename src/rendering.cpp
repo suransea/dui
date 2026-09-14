@@ -1486,8 +1486,8 @@ AccessibilityBridge::~AccessibilityBridge() { delivery_state_->alive = false; }
 
 bool AccessibilityBridge::publish(const SemanticsTree& tree, AccessibilityAdapter& adapter) {
   const std::shared_ptr<DeliveryState> delivery = delivery_state_;
-  if (delivery->delivering) {
-    throw std::logic_error("AccessibilityBridge delivery is not reentrant");
+  if (delivery->delivering || transaction_.has_value()) {
+    throw std::logic_error("AccessibilityBridge delivery is already active");
   }
   SemanticsDiffer next = differ_;
   SemanticsUpdate update = next.update(tree);
@@ -1511,8 +1511,8 @@ bool AccessibilityBridge::publish(const SemanticsTree& tree, AccessibilityAdapte
 
 bool AccessibilityBridge::clear(AccessibilityAdapter& adapter) {
   const std::shared_ptr<DeliveryState> delivery = delivery_state_;
-  if (delivery->delivering) {
-    throw std::logic_error("AccessibilityBridge delivery is not reentrant");
+  if (delivery->delivering || transaction_.has_value()) {
+    throw std::logic_error("AccessibilityBridge delivery is already active");
   }
   SemanticsDiffer next = differ_;
   SemanticsUpdate update = next.clear();
@@ -1532,6 +1532,78 @@ bool AccessibilityBridge::clear(AccessibilityAdapter& adapter) {
   }
   differ_.swap(next);
   return true;
+}
+
+std::optional<AccessibilityPublication> AccessibilityBridge::prepare(const SemanticsTree& tree) {
+  if (delivery_state_->delivering || transaction_.has_value()) {
+    throw std::logic_error("AccessibilityBridge delivery is already active");
+  }
+  SemanticsDiffer candidate = differ_;
+  SemanticsUpdate update = candidate.update(tree);
+  return begin_transaction(std::move(candidate), std::move(update));
+}
+
+std::optional<AccessibilityPublication> AccessibilityBridge::prepare_clear() {
+  if (delivery_state_->delivering || transaction_.has_value()) {
+    throw std::logic_error("AccessibilityBridge delivery is already active");
+  }
+  SemanticsDiffer candidate = differ_;
+  SemanticsUpdate update = candidate.clear();
+  return begin_transaction(std::move(candidate), std::move(update));
+}
+
+std::optional<AccessibilityPublication> AccessibilityBridge::retry() {
+  if (!transaction_.has_value() || transaction_->in_flight) {
+    return std::nullopt;
+  }
+  AccessibilityPublication publication{next_publication_generation(), transaction_->update};
+  transaction_->generation = publication.generation;
+  transaction_->in_flight = true;
+  return publication;
+}
+
+bool AccessibilityBridge::acknowledge(std::uint64_t generation) noexcept {
+  if (!transaction_.has_value() || !transaction_->in_flight ||
+      transaction_->generation != generation) {
+    return false;
+  }
+  differ_.swap(transaction_->candidate);
+  transaction_.reset();
+  return true;
+}
+
+bool AccessibilityBridge::reject(std::uint64_t generation) noexcept {
+  if (!transaction_.has_value() || !transaction_->in_flight ||
+      transaction_->generation != generation) {
+    return false;
+  }
+  transaction_->in_flight = false;
+  return true;
+}
+
+void AccessibilityBridge::reset_acknowledged() {
+  if (delivery_state_->delivering) {
+    throw std::logic_error("AccessibilityBridge delivery is already active");
+  }
+  differ_ = {};
+  transaction_.reset();
+}
+
+std::optional<AccessibilityPublication>
+AccessibilityBridge::begin_transaction(SemanticsDiffer candidate, SemanticsUpdate update) {
+  if (update.empty()) {
+    return std::nullopt;
+  }
+  AccessibilityPublication publication{next_publication_generation(), update};
+  transaction_ = Transaction{publication.generation, std::move(candidate), std::move(update), true};
+  return publication;
+}
+
+std::uint64_t AccessibilityBridge::next_publication_generation() {
+  if (next_generation_ == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error("Accessibility publication generation exhausted");
+  }
+  return next_generation_++;
 }
 
 SemanticsTree RenderOwner::semantics_tree() const {

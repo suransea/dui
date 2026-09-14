@@ -133,6 +133,8 @@ move, and child-first removal records for future native accessibility adapters.
 `AccessibilityBridge` delivers those records through a platform-neutral adapter
 contract and acknowledges snapshots only after successful delivery, allowing
 failed native updates to retry without losing state.
+It also exposes owned, generation-tagged prepare/acknowledge/reject transactions
+for upcoming host delivery across separate platform and UI executors.
 
 The native roadmap targets Linux, Android, macOS, iOS, and Windows through one
 shared host contract. Linux/Wayland is the first executable reference integration;
