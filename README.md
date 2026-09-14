@@ -168,6 +168,12 @@ fractional scaling plans, recoverable buffer preparation, and one outstanding
 frame callback. This is H0 protocol-state coverage only. A real libwayland,
 xkbcommon, `wl_shm`, and headless-Weston integration remains P1b and is not
 claimed by builds that lack those SDK/runtime dependencies.
+When `wayland-client`, `wayland-protocols`, and `wayland-scanner` are installed,
+CMake also enables the H1 `dui::wayland_native` connection target and generates
+its protocol bindings from the installed XML. Set
+`DUI_REQUIRE_WAYLAND_NATIVE=ON` when absence of that target must fail configure.
+This connection/registry/link slice does not yet claim an xdg window or Weston
+runtime verification.
 
 ## Build
 

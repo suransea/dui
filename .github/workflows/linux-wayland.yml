@@ -1,0 +1,19 @@
+name: Linux Wayland
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  native-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Wayland SDK
+        run: sudo apt-get update && sudo apt-get install -y libwayland-dev wayland-protocols
+      - name: Configure
+        run: cmake -S . -B build/wayland -G Ninja -DCMAKE_BUILD_TYPE=Debug -DDUI_REQUIRE_WAYLAND_NATIVE=ON
+      - name: Build
+        run: cmake --build build/wayland --target dui_wayland_native_link_tests
+      - name: Link smoke test
+        run: ctest --test-dir build/wayland -R dui_wayland_native_link_tests --output-on-failure

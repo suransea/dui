@@ -306,6 +306,20 @@ when those development dependencies are found. Running P1b under headless
 Weston is the first Linux H2 claim; compiling P1a without those dependencies is
 not H1 evidence.
 
+P1b.1 establishes the native SDK and connection boundary before creating a
+window. CMake discovers `wayland-client`, `wayland-protocols`, and
+`wayland-scanner`, generates private xdg-shell, viewporter, and fractional-scale
+bindings from installed XML, and exposes a separate `dui::wayland_native`
+target. A thread-affine RAII connection performs registry discovery, binds only
+supported versions, requires compositor, shared-memory, and xdg-shell globals,
+tracks optional seat/scaling globals and removals with known-instance fallback,
+and answers xdg-shell ping while its owner thread dispatches the connection.
+Missing dependencies omit the target by default; an explicit require
+option fails configuration. A final executable link against the real client ABI
+is H1 evidence only. P1b.2 creates the xdg window, drives P1a plans, submits
+diagnostic `wl_shm` buffers, and integrates `HostWindowDriver`; compositor runtime
+tests begin there.
+
 Implement the Wayland host first. The client performs an initial bufferless
 commit to trigger `xdg_surface.configure`, waits for configure, coalesces
 superseded configure events, acknowledges the latest configure it applies, and

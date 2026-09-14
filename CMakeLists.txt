@@ -8,6 +8,7 @@ option(DUI_BUILD_EXAMPLES "Build DUI examples" ON)
 option(DUI_BUILD_TESTS "Build DUI tests" ON)
 option(DUI_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(DUI_ENABLE_THREAD_SANITIZER "Enable ThreadSanitizer" OFF)
+option(DUI_REQUIRE_WAYLAND_NATIVE "Fail configuration unless the native Wayland target can be built" OFF)
 
 if(DUI_ENABLE_SANITIZERS AND DUI_ENABLE_THREAD_SANITIZER)
     message(FATAL_ERROR "Address/UndefinedBehaviorSanitizer and ThreadSanitizer are mutually exclusive")
@@ -41,6 +42,72 @@ target_include_directories(dui PUBLIC
 target_compile_features(dui PUBLIC cxx_std_23)
 target_link_libraries(dui PUBLIC Threads::Threads)
 dui_configure_target(dui)
+
+if(UNIX AND NOT APPLE)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(WAYLAND_CLIENT QUIET IMPORTED_TARGET wayland-client>=1.22)
+        pkg_check_modules(WAYLAND_PROTOCOLS QUIET wayland-protocols>=1.31)
+        if(WAYLAND_PROTOCOLS_FOUND)
+            pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
+        endif()
+    endif()
+    find_program(WAYLAND_SCANNER_EXECUTABLE NAMES wayland-scanner)
+    set(DUI_WAYLAND_PROTOCOL_XML_AVAILABLE OFF)
+    if(EXISTS "${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml" AND
+       EXISTS "${WAYLAND_PROTOCOLS_DIR}/stable/viewporter/viewporter.xml" AND
+       EXISTS "${WAYLAND_PROTOCOLS_DIR}/staging/fractional-scale/fractional-scale-v1.xml")
+        set(DUI_WAYLAND_PROTOCOL_XML_AVAILABLE ON)
+    endif()
+
+    if(WAYLAND_CLIENT_FOUND AND WAYLAND_PROTOCOLS_FOUND AND WAYLAND_SCANNER_EXECUTABLE AND DUI_WAYLAND_PROTOCOL_XML_AVAILABLE)
+        enable_language(C)
+        set(DUI_WAYLAND_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/wayland")
+
+        function(dui_generate_wayland_protocol name xml)
+            set(header "${DUI_WAYLAND_GENERATED_DIR}/${name}-client-protocol.h")
+            set(code "${DUI_WAYLAND_GENERATED_DIR}/${name}-protocol.c")
+            add_custom_command(
+                OUTPUT "${header}" "${code}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory "${DUI_WAYLAND_GENERATED_DIR}"
+                COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" client-header "${xml}" "${header}"
+                COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${xml}" "${code}"
+                DEPENDS "${xml}"
+                VERBATIM
+            )
+            set(DUI_WAYLAND_PROTOCOL_SOURCES ${DUI_WAYLAND_PROTOCOL_SOURCES} "${header}" "${code}" PARENT_SCOPE)
+        endfunction()
+
+        dui_generate_wayland_protocol(xdg-shell "${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml")
+        dui_generate_wayland_protocol(viewporter "${WAYLAND_PROTOCOLS_DIR}/stable/viewporter/viewporter.xml")
+        dui_generate_wayland_protocol(fractional-scale-v1 "${WAYLAND_PROTOCOLS_DIR}/staging/fractional-scale/fractional-scale-v1.xml")
+
+        add_library(dui_wayland_protocols STATIC ${DUI_WAYLAND_PROTOCOL_SOURCES})
+        target_include_directories(dui_wayland_protocols PUBLIC "${DUI_WAYLAND_GENERATED_DIR}")
+        target_link_libraries(dui_wayland_protocols PUBLIC PkgConfig::WAYLAND_CLIENT)
+
+        add_library(dui_wayland_native STATIC src/platform/wayland_native.cpp)
+        add_library(dui::wayland_native ALIAS dui_wayland_native)
+        target_link_libraries(dui_wayland_native PUBLIC dui::dui PRIVATE dui_wayland_protocols PkgConfig::WAYLAND_CLIENT)
+        target_include_directories(dui_wayland_native PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+        )
+        target_compile_features(dui_wayland_native PUBLIC cxx_std_23)
+        dui_configure_target(dui_wayland_native)
+
+        if(DUI_BUILD_TESTS)
+            add_executable(dui_wayland_native_link_tests tests/wayland_native_link_tests.cpp)
+            target_link_libraries(dui_wayland_native_link_tests PRIVATE dui::wayland_native)
+            dui_configure_target(dui_wayland_native_link_tests)
+            add_test(NAME dui_wayland_native_link_tests COMMAND dui_wayland_native_link_tests)
+        endif()
+    elseif(DUI_REQUIRE_WAYLAND_NATIVE)
+        message(FATAL_ERROR "Native Wayland requires wayland-client >= 1.22, wayland-protocols >= 1.31, and wayland-scanner")
+    endif()
+elseif(DUI_REQUIRE_WAYLAND_NATIVE)
+    message(FATAL_ERROR "Native Wayland is only available on non-Apple Unix systems")
+endif()
 
 if(WIN32)
     add_library(dui_win32 STATIC src/platform/win32_accessibility.cpp src/platform/win32_text_input.cpp)

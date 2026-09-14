@@ -143,9 +143,35 @@ content to commit during an outstanding callback. Only the matching callback
 generation releases queued ordinary frame demand. Tests cover initial ordering,
 zero-size compositor fallback, configure coalescing, stale plans, exact retry,
 buffer recreation, integer/fractional scaling, overflow rejection, callback
-coalescing, and stale callback rejection. P1b must connect this state to real
-protocol objects, `HostWindowDriver`, a `wl_shm` surface, and headless Weston
-before any Linux H1/H2 status advances.
+coalescing, and stale callback rejection. P1a alone is not native evidence;
+P1b.2 must still connect `HostWindowDriver` and a `wl_shm` surface before those
+window capabilities gain H1, then run under Weston before any Linux H2 claim.
+
+## P1b.1: Native Wayland Connection
+
+Status: H1 native compile and final-link verification completed against locally
+built upstream Wayland 1.24.0 and wayland-protocols 1.45. No compositor runtime
+or window behavior is claimed. The committed Ubuntu workflow is configured to
+repeat dependency-required generation, compilation, and final linking against
+distribution SDK packages. The local record is in
+`docs/evidence/linux-wayland-h1-2026-09-14.md`.
+
+When pkg-config, the protocol package, and `wayland-scanner` are available,
+CMake generates private xdg-shell, viewporter, and fractional-scale client
+bindings and enables `dui::wayland_native`. `WaylandConnection` is an owner-thread
+RAII boundary that connects, installs registry and xdg ping listeners, negotiates
+bounded compositor/shm/seat/shell/scaling versions, falls back to another known
+instance after selected-global removal, and
+rejects displays lacking compositor, shared memory, or xdg-shell. Native proxies
+are destroyed before display disconnect. `DUI_REQUIRE_WAYLAND_NATIVE=ON` turns
+missing SDK pieces into a configuration failure; normal cross-platform builds
+omit the target when unavailable.
+
+The native link smoke executable forces resolution of the C++ connection,
+generated protocol objects, and libwayland-client. It does not connect to a
+display and therefore is not H2. P1b.2 still must create/configure an xdg window,
+drive `WaylandSurfaceState`, submit/release `wl_shm` buffers, connect frame and
+close callbacks to `HostWindowDriver`, and run under Weston.
 
 ## M0: Headless Architecture
 
