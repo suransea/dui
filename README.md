@@ -162,6 +162,13 @@ tests do not claim an H1 native build or H2 native runtime. The earlier
 `Backend`/`NativeView` API remains temporarily for existing raster tests and is
 not an alternative native lifecycle contract.
 
+The Linux P1a slice adds a platform-neutral Wayland surface state engine for
+initial bufferless configuration, coalesced `xdg_surface` serials, integer and
+fractional scaling plans, recoverable buffer preparation, and one outstanding
+frame callback. This is H0 protocol-state coverage only. A real libwayland,
+xkbcommon, `wl_shm`, and headless-Weston integration remains P1b and is not
+claimed by builds that lack those SDK/runtime dependencies.
+
 ## Build
 
 ```sh

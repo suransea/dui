@@ -118,6 +118,35 @@ malformed UTF-8, duplicate and stale completion, replacement cancellation,
 backend failure, cursor coalescing/retry/replacement, task-post failure, ordered
 shutdown cancellation, and platform-affine backend release.
 
+## P1a: Wayland Surface State Engine
+
+Status: H0 platform-neutral protocol-state implementation verified. No Wayland
+SDK build (H1) or compositor runtime (H2) is claimed; this environment does not
+currently provide libwayland development metadata, `wayland-scanner`, xkbcommon,
+or Weston.
+
+`WaylandSurfaceState` models the ordering boundary that the P1b native adapter
+will drive. It permits exactly one initial bufferless commit, snapshots staged
+toplevel dimensions only when a surface configure serial arrives,
+coalesces superseded configures, and emits generation/revision-tagged
+pre-submission plans. Plans carry the configure acknowledgment, logical and
+physical extents,
+integer `wl_surface` scale or fractional viewporter mapping, and optional frame
+callback request. New configure, scale, or buffer-loss state invalidates a
+prepared plan; discarding it before any native request preserves desired state
+for a fresh retry. Submission records the irreversible acknowledgment/frame
+intent; later native transport failure is terminal rather than retrying a
+consumed configure serial.
+
+Frame demand creates at most one callback while allowing required configure
+content to commit during an outstanding callback. Only the matching callback
+generation releases queued ordinary frame demand. Tests cover initial ordering,
+zero-size compositor fallback, configure coalescing, stale plans, exact retry,
+buffer recreation, integer/fractional scaling, overflow rejection, callback
+coalescing, and stale callback rejection. P1b must connect this state to real
+protocol objects, `HostWindowDriver`, a `wl_shm` surface, and headless Weston
+before any Linux H1/H2 status advances.
+
 ## M0: Headless Architecture
 
 Status: implemented and verified.

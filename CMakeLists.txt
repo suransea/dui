@@ -31,7 +31,7 @@ function(dui_configure_target target)
     endif()
 endfunction()
 
-add_library(dui src/animation.cpp src/backend.cpp src/host.cpp src/input.cpp src/rendering.cpp src/task.cpp src/ui.cpp)
+add_library(dui src/animation.cpp src/backend.cpp src/host.cpp src/input.cpp src/platform/wayland.cpp src/rendering.cpp src/task.cpp src/ui.cpp)
 add_library(dui::dui ALIAS dui)
 
 target_include_directories(dui PUBLIC
@@ -80,6 +80,11 @@ if(DUI_BUILD_TESTS)
     target_link_libraries(dui_host_tests PRIVATE dui::dui)
     dui_configure_target(dui_host_tests)
     add_test(NAME dui_host_tests COMMAND dui_host_tests)
+
+    add_executable(dui_wayland_state_tests tests/wayland_state_tests.cpp)
+    target_link_libraries(dui_wayland_state_tests PRIVATE dui::dui)
+    dui_configure_target(dui_wayland_state_tests)
+    add_test(NAME dui_wayland_state_tests COMMAND dui_wayland_state_tests)
 
     add_executable(dui_rendering_tests tests/rendering_tests.cpp)
     target_link_libraries(dui_rendering_tests PRIVATE dui::dui)

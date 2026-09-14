@@ -283,6 +283,29 @@ emulating an IME or native accessibility client.
 
 ### P1: Linux Reference Host Integration
 
+P1 is split so protocol ordering can be reviewed independently without treating
+a mock compositor as native evidence. P1a adds a platform-neutral Wayland
+surface state engine with no generated protocol or SDK types in its public API.
+It requires one initial bufferless commit, stages `xdg_toplevel.configure` until
+an `xdg_surface.configure` serial snapshots it, coalesces superseded serials,
+and produces generation-tagged pre-submission content plans. A plan contains the
+configure acknowledgment, logical/buffer extents, integer buffer scale or
+fractional viewporter mapping, and whether that commit creates the sole frame
+callback. New configure/scale/buffer-loss state invalidates a prepared plan;
+discarding it before any protocol request retains desired state for retry under
+a fresh generation. Submission records acknowledgment and frame-callback intent
+immediately before the adapter issues those irreversible requests. Any later
+native transport failure is terminal for the host connection, never a retry of
+the consumed serial. Configure
+commits may proceed while a frame callback is outstanding, but ordinary frame
+demand waits for that callback's exact generation. P1a tests establish H0 only.
+
+P1b connects that engine to real `libwayland-client`, generated stable protocol
+bindings, xkbcommon, `wl_shm`, and `HostWindowDriver`. Its target is enabled only
+when those development dependencies are found. Running P1b under headless
+Weston is the first Linux H2 claim; compiling P1a without those dependencies is
+not H1 evidence.
+
 Implement the Wayland host first. The client performs an initial bufferless
 commit to trigger `xdg_surface.configure`, waits for configure, coalesces
 superseded configure events, acknowledges the latest configure it applies, and
