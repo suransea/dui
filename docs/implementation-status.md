@@ -173,8 +173,9 @@ display and therefore is not H2.
 
 ## P1b.2a: Xdg Window And Diagnostic Shared Memory
 
-Status: implemented and locally H1-compiled; H2 remains pending the committed
-headless Weston workflow result.
+Status: H2 verified under headless Weston with AddressSanitizer and
+UndefinedBehaviorSanitizer. The committed evidence is in
+`docs/evidence/linux-wayland-h2-2026-09-14.md`.
 
 `WaylandWindow` creates the single xdg toplevel supported by the reference
 connection and pairs it with `HostWindow`/`HostWindowDriver`. The connection now
