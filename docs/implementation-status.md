@@ -48,8 +48,8 @@ tests also exercise RenderObjects that outlive their RenderOwner.
 
 ## M2: Interaction
 
-Status: implementation complete; platform-native verification remains in
-progress.
+Status: platform-neutral implementation complete; milestone completion remains
+pending H2 native runtime verification under RFC 0002.
 
 Implemented foundation:
 
@@ -325,6 +325,12 @@ verified. Opt-in inspector state-value formatting is also implemented and
 verified. The first detached HTML tooling frontend and same-process state-
 restoration slice are implemented and verified.
 
+Cross-platform host implementation is now governed by RFC 0002. Linux, Android,
+macOS, iOS, and Windows share one planned host lifecycle and use explicit H0-H3
+verification tiers. Existing Win32 adapters are H1 (native SDK build/link) until
+they execute in Windows CI; they no longer define the sole next platform
+milestone.
+
 `BuildOwner::inspect()` now captures an owned, passive Element-tree snapshot.
 Each node records stable identity/generation, depth, name/value/key, active or
 dormant keep-alive state, update/dirty state, safe state/dependency/environment/
@@ -518,10 +524,17 @@ The prototype has been built and tested with:
   still require adapters.
 - Windows UI Automation is the only native accessibility adapter. macOS
   Accessibility, Linux AT-SPI, and mobile adapters are not implemented, and the
-  Win32 provider still requires target-OS interoperability verification.
+  Win32 provider still requires target-OS interoperability verification. Its
+  synthetic-root `SetFocus()` also requires window-executor marshaling before H2
+  because COM may invoke retained providers from a non-window thread.
 
 ## Next Milestone
 
-Run the Win32 text-input and accessibility suites against a real message-pumped
-HWND, native IMEs, UIA clients, and a screen reader. M3 continues with a
-production GPU layer consumer and accessibility adapters for other platforms.
+Implement RFC 0002 P0: the platform-neutral host application/window/delegate
+contract and deterministic fake-host lifecycle tests. Then implement the P1
+Linux Wayland reference host and exercise it under headless Weston, advancing
+window lifecycle, metrics, frame scheduling, input, surface recovery, text input,
+and AT-SPI independently through H1 build and H2 runtime verification. Android,
+macOS, iOS, and Windows host integrations can proceed in parallel when their SDK
+and native runners are available; real Windows IME/UIA interoperability remains
+tracked H2/H3 work rather than blocking executable cross-platform progress.

@@ -280,6 +280,16 @@ failed-delivery retry with identical changes, failed and successful clear,
 reentrant publish/clear rejection, callback-driven bridge destruction, malformed
 tree rejection before adapter invocation, and BuildOwner snapshot delivery.
 
+This synchronous bridge requires adapter application on its UI thread. An RFC
+0002 host with separate platform and UI executors adds an asynchronous publisher:
+it copies an owned delta, posts native application to the platform executor, and
+posts a generation-tagged success or failure acknowledgment back to the UI
+executor. Only that acknowledgment advances the bridge snapshot; one publication
+per window is in flight, failure retries from the last acknowledged tree, and
+window/delegate generation changes discard stale completions. Synchronous native
+provider queries continue to read the adapter's retained platform-side snapshot
+without entering the bridge or `BuildOwner`.
+
 The first native accessibility consumer is a conditional Win32 UI Automation
 adapter bound to one `HWND`. Because a semantics snapshot may contain multiple
 roots, it presents one synthetic fragment root without consuming a semantic ID
@@ -290,14 +300,21 @@ available after removal rather than exposing stale properties. Roles map to UIA
 group, text, image, and button control types; labels, read-only values, enabled
 state, logical client bounds, parent/sibling/child navigation, deterministic
 reverse-order point lookup, and the Invoke pattern are exposed. Invoke posts a
-private window message and returns immediately; the host callback then normally
-calls `BuildOwner::perform_semantics_action` on the window thread. Semantic focus
-is not fabricated before the platform-neutral tree exposes focus state. Delivered
-batches validate and replace the native model transactionally, then invalidate
-the root's child structure.
+private window message and returns immediately; the host callback then posts a
+generation-checked `BuildOwner::perform_semantics_action` request to the UI
+executor. It may run directly only when the platform and UI executors are
+explicitly co-located and the native provider callback has unwound. Semantic
+focus is not fabricated before the platform-neutral tree exposes focus state.
+Delivered batches validate and replace the native model transactionally, then
+invalidate the root's child structure.
 The host forwards `WM_GETOBJECT` to the adapter before `DefWindowProcW`; all COM
-and window-procedure entry points translate C++ exceptions. Provider access,
-adapter updates, and actions are confined to the window-owning thread. Bounds
+and window-procedure entry points translate C++ exceptions. UIA/COM provider
+queries may run on non-window threads and read the synchronized retained model.
+The RFC 0002 host must marshal HWND mutation, adapter publication, and native
+action capture to the window executor; framework action execution is UI-
+executor-affine. The current H1 adapter's synthetic-root `SetFocus()` still
+calls the HWND directly and must be marshaled before Windows H2 verification.
+Bounds
 are supplied in logical client coordinates and converted to physical screen
 coordinates with a device-pixel ratio that the host updates after DPI changes.
 Provider state is synchronized for UIA calls, and teardown disconnects the root
@@ -317,7 +334,8 @@ requesting focus, preserving the same stale, hidden, clipped, lazy-cache, and
 dormant exclusions as activation. The Win32 adapter maps the state to
 `IsKeyboardFocusable` and `HasKeyboardFocus`, resolves fragment-root `GetFocus`,
 and marshals provider `SetFocus` through its private HWND action message before
-requesting native window and framework focus. `HasKeyboardFocus` and `GetFocus`
+requesting native window focus and posting framework focus to the UI executor.
+`HasKeyboardFocus` and `GetFocus`
 also require actual keyboard focus within the active HWND. Focus events are
 deferred until synchronous `WM_SETFOCUS` handling and framework publication
 settle, use an adapter-lifetime cookie to reject stale posted messages, and call
@@ -336,8 +354,10 @@ and candidate/composition positioning. Each adapter is bound to one native
 view and has one active, generation-addressed session. Stale session operations
 are ignored. Editable rectangles are in logical client coordinates and are
 converted using the native view's device-pixel ratio. Adapter operations and
-client callbacks are confined to the window-owning thread, and exceptions must
-not cross the native event-procedure boundary.
+retained native editing snapshots are confined to the window-owning thread.
+Generation-checked editing updates and actions are posted to the UI executor
+unless both executors are explicitly co-located; exceptions must not cross the
+native event-procedure boundary.
 
 ## Reflection
 
@@ -595,6 +615,13 @@ coordinator can schedule retry with current metrics.
 - optional reflection metadata
 - stable plugin ABI experiments
 - Android, iOS, Windows, macOS, and Linux hosts
+
+Native host work follows [RFC 0002](0002-cross-platform-hosts.md): one shared
+host contract, explicit per-platform adapters, verification tiers that separate
+headless tests, SDK builds, automated native execution, and physical/manual
+interoperability, and a Linux reference host before further Windows-only
+expansion. Android, macOS, iOS, and Windows remain first-class planned hosts and
+may advance in parallel whenever suitable SDK runners are available.
 
 M4 begins with a platform-neutral structured inspector. `BuildOwner::inspect()`
 returns an owned value snapshot containing Element ID and generation, depth,

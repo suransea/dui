@@ -134,6 +134,14 @@ move, and child-first removal records for future native accessibility adapters.
 contract and acknowledges snapshots only after successful delivery, allowing
 failed native updates to retry without losing state.
 
+The native roadmap targets Linux, Android, macOS, iOS, and Windows through one
+shared host contract. Linux/Wayland is the first executable reference integration;
+Android uses a thin Activity/View and JNI bridge, Apple hosts use separate
+AppKit/UIKit adapters over shared C++ and Metal seams, and Windows integrates the
+existing IMM32/UI Automation work into the same lifecycle. Build-only,
+simulator/compositor, and physical-device verification are reported separately;
+see [RFC 0002](docs/rfcs/0002-cross-platform-hosts.md).
+
 ## Build
 
 ```sh
