@@ -25,3 +25,9 @@ compiled warning-free, and `dui_wayland_native_link_tests` linked against
 libwayland-client and passed. The test intentionally did not connect to a
 display. P1b.2 must provide xdg-window and `wl_shm` runtime evidence under
 Weston before Linux advances to H2.
+
+GitHub Actions run
+[`34875281670`](https://github.com/suransea/dui/actions/runs/34875281670) repeated
+the required configure, generation, build, final link, and smoke test
+successfully on Ubuntu 24.04 using distribution `libwayland-dev` and
+`wayland-protocols` packages.
