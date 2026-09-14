@@ -821,6 +821,7 @@ std::unique_ptr<WaylandWindow> WaylandWindow::create(WaylandConnection& connecti
   impl->endpoints =
     make_host_window(id, std::move(configuration), connection.impl_->runner,
                      connection.impl_->runner, impl->control, nullptr, std::move(error_handler));
+  impl->endpoints.driver.set_surface_state(HostSurfaceState::available);
   if (!impl->surface_state.begin_initial_commit()) {
     throw std::logic_error("Wayland initial commit state was already consumed");
   }
