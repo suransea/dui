@@ -199,7 +199,10 @@ buffer recreation in P1b.4.
 
 ## P1b.2b: Native Wayland Scaling
 
-Status: specified; implementation and native evidence pending.
+Status: implemented and H2 verified for the scaling path advertised by the
+Ubuntu headless Weston runner. Fractional-specific H2 remains conditional on a
+compositor advertising that optional global. The committed evidence is in
+`docs/evidence/linux-wayland-scaling-h2-2026-09-14.md`.
 
 This slice binds stable per-output objects and drives integer fallback scale
 from the maximum scale of outputs currently entered by the surface. When both

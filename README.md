@@ -179,6 +179,10 @@ driven by the shared Wayland state engine. Its compositor test covers initial
 configure, coalesced demand producing one frame callback, and `HostWindow`
 shutdown notification under headless Weston; this remains a diagnostic surface
 rather than a production renderer.
+P1b.2b tracks stable `wl_output` objects and applies the maximum entered-output
+integer scale, or compositor fractional scale through a per-window viewport
+when both optional protocols are advertised. Scale changes repaint the
+diagnostic buffer and publish matching physical metrics and device-pixel ratio.
 
 ## Build
 
