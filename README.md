@@ -174,6 +174,11 @@ its protocol bindings from the installed XML. Set
 `DUI_REQUIRE_WAYLAND_NATIVE=ON` when absence of that target must fail configure.
 This connection/registry/link slice does not yet claim an xdg window or Weston
 runtime verification.
+P1b.2a adds one xdg toplevel and checked memfd-backed XRGB8888 diagnostic buffers
+driven by the shared Wayland state engine. Its compositor test covers initial
+configure, coalesced demand producing one frame callback, and `HostWindow`
+shutdown notification under headless Weston; this remains a diagnostic surface
+rather than a production renderer.
 
 ## Build
 

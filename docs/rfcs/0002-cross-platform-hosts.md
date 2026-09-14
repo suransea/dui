@@ -292,11 +292,12 @@ and produces generation-tagged pre-submission content plans. A plan contains the
 configure acknowledgment, logical/buffer extents, integer buffer scale or
 fractional viewporter mapping, and whether that commit creates the sole frame
 callback. New configure/scale/buffer-loss state invalidates a prepared plan;
-discarding it before any protocol request retains desired state for retry under
-a fresh generation. Submission records acknowledgment and frame-callback intent
-immediately before the adapter issues those irreversible requests. Any later
-native transport failure is terminal for the host connection, never a retry of
-the consumed serial. Configure
+discarding it before irreversible surface requests retains desired state for
+retry under a fresh generation. Temporary buffer resources created first may be
+destroyed with a discarded plan. Submission records acknowledgment and
+frame-callback intent immediately before the adapter issues those irreversible
+requests. Any later native transport failure is terminal for the host
+connection, never a retry of the consumed serial. Configure
 commits may proceed while a frame callback is outstanding, but ordinary frame
 demand waits for that callback's exact generation. P1a tests establish H0 only.
 
@@ -319,6 +320,22 @@ option fails configuration. A final executable link against the real client ABI
 is H1 evidence only. P1b.2 creates the xdg window, drives P1a plans, submits
 diagnostic `wl_shm` buffers, and integrates `HostWindowDriver`; compositor runtime
 tests begin there.
+
+P1b.2a delivers one xdg toplevel per connection using a non-inline owner-thread
+task runner for both host executors. The initial bufferless commit triggers
+configure. Each accepted P1a plan allocates and paints a checked XRGB8888
+`memfd`/`wl_shm` diagnostic buffer before crossing the submission boundary, then
+acks configure, sets integer buffer scale, optionally creates the sole frame
+callback, attaches, damages, and commits in that order. Buffer release owns
+proxy and mapping retirement. Frame timestamps unwrap the protocol's 32-bit
+milliseconds and carry the matching host frame generation into
+`HostWindowDriver`; xdg close enters the framework delegate. Window destruction
+detaches its host control before owner-thread native destruction so queued or
+reentrant shutdown work cannot retain a native owner. Headless Weston
+verifies initial configure, one diagnostic commit, coalesced frame demand, and
+host shutdown notification as H2 for this subset only. P1b.2b adds
+output/fractional scale, seat input, wakeable cross-thread dispatch, and
+recoverable surface recreation.
 
 Implement the Wayland host first. The client performs an initial bufferless
 commit to trigger `xdg_surface.configure`, waits for configure, coalesces

@@ -133,10 +133,10 @@ pre-submission plans. Plans carry the configure acknowledgment, logical and
 physical extents,
 integer `wl_surface` scale or fractional viewporter mapping, and optional frame
 callback request. New configure, scale, or buffer-loss state invalidates a
-prepared plan; discarding it before any native request preserves desired state
-for a fresh retry. Submission records the irreversible acknowledgment/frame
-intent; later native transport failure is terminal rather than retrying a
-consumed configure serial.
+prepared plan; discarding it before irreversible surface requests preserves
+desired state for a fresh retry. Submission records the irreversible
+acknowledgment/frame intent; later native transport failure is terminal rather
+than retrying a consumed configure serial.
 
 Frame demand creates at most one callback while allowing required configure
 content to commit during an outstanding callback. Only the matching callback
@@ -169,9 +169,32 @@ omit the target when unavailable.
 
 The native link smoke executable forces resolution of the C++ connection,
 generated protocol objects, and libwayland-client. It does not connect to a
-display and therefore is not H2. P1b.2 still must create/configure an xdg window,
-drive `WaylandSurfaceState`, submit/release `wl_shm` buffers, connect frame and
-close callbacks to `HostWindowDriver`, and run under Weston.
+display and therefore is not H2.
+
+## P1b.2a: Xdg Window And Diagnostic Shared Memory
+
+Status: implemented and locally H1-compiled; H2 remains pending the committed
+headless Weston workflow result.
+
+`WaylandWindow` creates the single xdg toplevel supported by the reference
+connection and pairs it with `HostWindow`/`HostWindowDriver`. The connection now
+owns a non-inline owner-thread task runner used for both host executors and
+drained around display dispatch and roundtrip. Initial configure drives the P1a
+state engine. A pre-submission plan allocates a checked memfd-backed XRGB8888
+buffer, paints a deterministic diagnostic color, then records submission before
+configure acknowledgment, integer buffer scale, frame creation, attach, damage,
+and commit. Released buffers retire their proxy and mapping.
+
+Frame callbacks carry native content and host frame generations, unwrap 32-bit
+millisecond timestamps, and enter `HostWindowDriver::frame_pulse`. Xdg close
+enters the framework close callback. Window destruction detaches its host
+control before owner-thread destruction of callbacks, buffers, and xdg/core
+surface objects, making queued or reentrant shutdown calls inert. The native
+window executable checks configure, diagnostic commit, coalesced demand
+producing one frame, delegate creation, and host shutdown notification under a
+real compositor. Output/fractional scale events, input, a framework-facing
+`RasterSurface`, cross-thread eventfd wakeup, and recoverable buffer recreation
+remain P1b.2b work.
 
 ## M0: Headless Architecture
 
