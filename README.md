@@ -138,6 +138,10 @@ for upcoming host delivery across separate platform and UI executors.
 The H0 host coordinator now uses those transactions for optional accessibility
 services, including coalesced desired trees, explicit failed-batch retry,
 generation-safe adapter replacement and actions, and platform-affine release.
+It also exposes an existing-API-compatible text-input proxy that marshals public
+sessions, full editing values, geometry, native callbacks, backend replacement,
+and shutdown across the UI and platform executors without exposing native
+session IDs.
 
 The native roadmap targets Linux, Android, macOS, iOS, and Windows through one
 shared host contract. Linux/Wayland is the first executable reference integration;

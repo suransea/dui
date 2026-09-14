@@ -120,6 +120,68 @@ public:
   bool fail_next{};
 };
 
+struct TextBackendLog {
+  struct Start {
+    dui::TextInputSessionId native_session{};
+    dui::TextEditingValue value;
+    std::weak_ptr<dui::TextInputClient> client;
+  };
+
+  std::vector<Start> starts;
+  std::vector<std::pair<dui::TextInputSessionId, dui::TextEditingValue>> updates;
+  std::vector<std::pair<dui::TextInputSessionId, dui::Rect>> rects;
+  std::vector<dui::TextInputSessionId> stops;
+};
+
+class RecordingTextBackend final : public dui::TextInputBackend {
+public:
+  explicit RecordingTextBackend(std::shared_ptr<TextBackendLog> log) : log_(std::move(log)) {}
+
+  dui::TextInputSessionId start_text_input(std::weak_ptr<dui::TextInputClient> client,
+                                           dui::TextInputConfiguration,
+                                           dui::TextEditingValue value) override {
+    if (fail_start) {
+      fail_start = false;
+      throw std::runtime_error("text start failed");
+    }
+    const auto session = ++next_session;
+    log_->starts.push_back({session, std::move(value), std::move(client)});
+    return session;
+  }
+  void update_editing_state(dui::TextInputSessionId session, dui::TextEditingValue value) override {
+    if (fail_update) {
+      fail_update = false;
+      throw std::runtime_error("text update failed after session loss");
+    }
+    log_->updates.emplace_back(session, std::move(value));
+  }
+  void stop_text_input(dui::TextInputSessionId session) override { log_->stops.push_back(session); }
+  void set_editable_rect(dui::TextInputSessionId session, dui::Rect rect) override {
+    if (fail_rect) {
+      fail_rect = false;
+      throw std::runtime_error("text rectangle failed after session loss");
+    }
+    log_->rects.emplace_back(session, rect);
+  }
+
+  std::shared_ptr<TextBackendLog> log_;
+  dui::TextInputSessionId next_session{};
+  bool fail_start{};
+  bool fail_update{};
+  bool fail_rect{};
+};
+
+class RecordingTextClient final : public dui::TextInputClient {
+public:
+  void update_editing_value(dui::TextEditingValue value) override {
+    values.push_back(std::move(value));
+  }
+  void perform_action(dui::TextInputAction action) override { actions.push_back(action); }
+
+  std::vector<dui::TextEditingValue> values;
+  std::vector<dui::TextInputAction> actions;
+};
+
 dui::SemanticsNode semantics_node(std::uint64_t id, std::string label) {
   return {id,
           dui::SemanticsRole::button,
@@ -762,6 +824,157 @@ void accessibility_service_publishes_retries_and_replaces() {
           "accessibility adapter was not released on platform shutdown execution");
 }
 
+void text_input_service_marshals_sessions_and_replacement() {
+  Rig rig;
+  auto proxy = rig.endpoints.window.text_input_backend();
+  auto first_client = std::make_shared<RecordingTextClient>();
+  const auto stale_session =
+    proxy->start_text_input(first_client, {}, {"old", {3, 3}, std::nullopt});
+  const auto session = proxy->start_text_input(first_client, {}, {"initial", {7, 7}, std::nullopt});
+  proxy->update_editing_state(session, {"latest", {6, 6}, std::nullopt});
+  proxy->set_editable_rect(session, {{1.0, 2.0}, {30.0, 10.0}});
+  proxy->set_editable_rect(session, {{3.0, 4.0}, {40.0, 12.0}});
+  require(rig.platform->pending_count() == 1,
+          "pre-service text input commands did not coalesce to one platform sync");
+
+  auto first_log = std::make_shared<TextBackendLog>();
+  auto first_backend = std::make_shared<RecordingTextBackend>(first_log);
+  const auto first_service = rig.endpoints.driver.set_text_input_backend(first_backend);
+  require(first_service.has_value() && first_service->valid(),
+          "text backend installation did not return a service generation");
+  rig.platform->run_all();
+  require(first_log->starts.size() == 1 && first_log->starts.front().value.text == "latest" &&
+            first_log->rects.size() == 1 &&
+            first_log->rects.front().second == dui::Rect{{3.0, 4.0}, {40.0, 12.0}} &&
+            first_log->updates.empty(),
+          "pending text start did not use the latest value and editable rectangle");
+
+  require(!throws<std::invalid_argument>([&] {
+    proxy->update_editing_state(stale_session, {"\x80", {0, 0}, std::nullopt});
+  }) && throws<std::invalid_argument>([&] {
+    proxy->update_editing_state(session, {"\x80", {0, 0}, std::nullopt});
+  }),
+          "stale text session was validated or active malformed UTF-8 was accepted");
+  proxy->update_editing_state(session, {"framework", {9, 9}, std::nullopt});
+  rig.platform->run_all();
+  require(first_log->updates.size() == 1 && first_log->updates.front().second.text == "framework",
+          "active framework editing state was not marshaled to the native session");
+
+  auto old_forwarder = first_log->starts.front().client.lock();
+  require(old_forwarder != nullptr, "native backend did not retain a live forwarding client");
+  old_forwarder->update_editing_value({"native", {6, 6}, std::nullopt});
+  old_forwarder->perform_action(dui::TextInputAction::done);
+  proxy->stop_text_input(session);
+  rig.ui->run_all();
+  rig.platform->run_all();
+  require(first_client->values.empty() && first_client->actions.empty() &&
+            first_log->stops.size() == 1,
+          "stopped public session accepted queued native callbacks or did not stop native input");
+
+  auto second_client = std::make_shared<RecordingTextClient>();
+  const auto replacement_session =
+    proxy->start_text_input(second_client, {}, {"replacement", {11, 11}, std::nullopt});
+  rig.platform->run_all();
+  auto current_forwarder = first_log->starts.back().client.lock();
+  current_forwarder->update_editing_value({"native retained", {15, 15}, std::nullopt});
+  rig.ui->run_all();
+  auto second_log = std::make_shared<TextBackendLog>();
+  auto second_backend = std::make_shared<RecordingTextBackend>(second_log);
+  const auto second_service = rig.endpoints.driver.set_text_input_backend(second_backend);
+  rig.platform->run_all();
+  require(second_service.has_value() && second_service->value > first_service->value &&
+            first_log->stops.size() == 2 && second_log->starts.size() == 1 &&
+            second_log->starts.front().value.text == "native retained",
+          "text backend replacement did not stop old native input before restarting current state");
+  second_client->values.clear();
+  current_forwarder->update_editing_value({"stale", {5, 5}, std::nullopt});
+  auto replacement_forwarder = second_log->starts.front().client.lock();
+  replacement_forwarder->update_editing_value({"current", {7, 7}, std::nullopt});
+  replacement_forwarder->perform_action(dui::TextInputAction::search);
+  rig.ui->run_all();
+  require(second_client->values.size() == 1 && second_client->values.front().text == "current" &&
+            second_client->actions ==
+              std::vector<dui::TextInputAction>{dui::TextInputAction::search},
+          "text forwarding accepted an old service callback or lost current values/actions");
+
+  second_backend->fail_update = true;
+  proxy->update_editing_state(replacement_session, {"recreated", {9, 9}, std::nullopt});
+  rig.platform->run_all();
+  require(rig.errors.back() == dui::HostErrorSource::text_input && second_log->stops.size() == 1 &&
+            second_log->starts.size() == 2 && second_log->starts.back().value.text == "recreated",
+          "native update failure did not invalidate and recreate the backend session");
+
+  second_client->values.clear();
+  second_client->actions.clear();
+  replacement_forwarder->update_editing_value(
+    {"discarded native instance", {25, 25}, std::nullopt});
+  auto recreated_forwarder = second_log->starts.back().client.lock();
+  recreated_forwarder->update_editing_value({"recreated native", {16, 16}, std::nullopt});
+  recreated_forwarder->perform_action(dui::TextInputAction::send);
+  rig.ui->run_all();
+  require(second_client->values.size() == 1 &&
+            second_client->values.front().text == "recreated native" &&
+            second_client->actions == std::vector<dui::TextInputAction>{dui::TextInputAction::send},
+          "old native-instance forwarding callback survived session recreation");
+
+  second_backend->fail_rect = true;
+  proxy->set_editable_rect(replacement_session, {{5.0, 6.0}, {20.0, 8.0}});
+  rig.platform->run_all();
+  require(rig.platform->pending_count() == 0 && second_log->starts.size() == 2,
+          "persistent editable-rectangle failure entered an automatic restart loop");
+  proxy->set_editable_rect(replacement_session, {{7.0, 8.0}, {24.0, 9.0}});
+  rig.platform->run_all();
+  require(second_log->stops.size() == 2 && second_log->starts.size() == 3 &&
+            second_log->rects.back().second == dui::Rect{{7.0, 8.0}, {24.0, 9.0}},
+          "framework rectangle retry did not recreate and synchronize native text input");
+
+  auto expiry_forwarder = second_log->starts.back().client.lock();
+  second_client.reset();
+  expiry_forwarder->perform_action(dui::TextInputAction::done);
+  rig.ui->run_all();
+  rig.platform->run_all();
+  require(second_log->stops.size() == 3,
+          "expired framework text client did not retire its native session");
+  proxy->stop_text_input(replacement_session);
+  auto retry_client = std::make_shared<RecordingTextClient>();
+  second_backend->fail_start = true;
+  const auto retry_session =
+    proxy->start_text_input(retry_client, {}, {"retry", {5, 5}, std::nullopt});
+  rig.platform->run_all();
+  require(rig.errors.back() == dui::HostErrorSource::text_input && second_log->starts.size() == 3,
+          "text start failure was not contained without installing a native session");
+  proxy->update_editing_state(retry_session, {"retry latest", {12, 12}, std::nullopt});
+  rig.platform->run_all();
+  require(second_log->starts.size() == 4 && second_log->starts.back().value.text == "retry latest",
+          "text desired update did not retry a failed native start");
+
+  std::weak_ptr<RecordingTextBackend> weak_backend = second_backend;
+  first_backend.reset();
+  second_backend.reset();
+  rig.endpoints.window.shutdown();
+  rig.ui->run_all();
+  require(!weak_backend.expired(), "native text backend was released before platform shutdown");
+  rig.platform->run_all();
+  require(weak_backend.expired() && second_log->stops.size() == 4 &&
+            !rig.endpoints.window.text_input_backend() && throws<std::logic_error>([&] {
+              static_cast<void>(proxy->start_text_input(retry_client, {}, {"", {}, std::nullopt}));
+            }),
+          "text shutdown did not stop/release the backend or make the old proxy inert");
+
+  Rig post_failure;
+  auto failed_proxy = post_failure.endpoints.window.text_input_backend();
+  auto failed_client = std::make_shared<RecordingTextClient>();
+  post_failure.platform->fail_next_post = true;
+  require(throws<std::runtime_error>([&] {
+            static_cast<void>(
+              failed_proxy->start_text_input(failed_client, {}, {"post", {4, 4}, std::nullopt}));
+          }) &&
+            !post_failure.endpoints.window.valid() &&
+            post_failure.errors.front() == dui::HostErrorSource::task_post,
+          "text platform-post failure did not stop the host and fail session creation");
+  post_failure.drain();
+}
+
 void raster_surface_identity_remains_the_existing_boundary() {
   Rig rig;
   require(rig.endpoints.window.raster_surface() == rig.surface,
@@ -791,6 +1004,7 @@ int main() {
     shutdown_delivery_stays_weak_and_platform_affine();
     shutdown_is_ordered_idempotent_and_invalidates_endpoints();
     accessibility_service_publishes_retries_and_replaces();
+    text_input_service_marshals_sessions_and_replacement();
     raster_surface_identity_remains_the_existing_boundary();
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';

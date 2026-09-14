@@ -12,6 +12,18 @@ namespace dui {
 
 namespace detail {
 
+class HostTextInputProxy;
+
+struct HostTextSession {
+  TextInputSessionId id{};
+  std::weak_ptr<TextInputClient> client;
+  TextInputConfiguration configuration;
+  TextEditingValue value;
+  std::optional<Rect> editable_rect;
+  std::uint64_t value_revision{1};
+  std::uint64_t rect_revision{};
+};
+
 struct HostWindowState {
   mutable std::recursive_mutex dispatch_mutex;
   mutable std::mutex mutex;
@@ -48,7 +60,37 @@ struct HostWindowState {
   bool accessibility_in_flight{};
   bool accessibility_retry_pending{};
   bool accessibility_retry_requested{};
+  std::shared_ptr<TextInputBackend> text_input_backend;
+  std::shared_ptr<TextInputBackend> text_input_proxy;
+  std::shared_ptr<TextInputBackend> native_text_backend;
+  std::shared_ptr<TextInputClient> native_text_client;
+  std::optional<HostTextSession> text_session;
+  TextInputSessionId native_text_session{};
+  TextInputSessionId native_text_public_session{};
+  std::uint64_t text_service_generation{};
+  std::uint64_t native_text_service_generation{};
+  std::uint64_t native_text_callback_generation{};
+  std::uint64_t text_next_session{1};
+  std::uint64_t text_next_callback_generation{1};
+  std::uint64_t native_text_value_revision{};
+  std::uint64_t native_text_rect_revision{};
+  bool text_sync_pending{};
   HostErrorHandler error_handler;
+};
+
+class HostTextInputProxy final : public TextInputBackend {
+public:
+  explicit HostTextInputProxy(std::weak_ptr<HostWindowState> state) : state_(std::move(state)) {}
+
+  [[nodiscard]] TextInputSessionId start_text_input(std::weak_ptr<TextInputClient> client,
+                                                    TextInputConfiguration configuration,
+                                                    TextEditingValue initial_value) override;
+  void update_editing_state(TextInputSessionId session, TextEditingValue value) override;
+  void stop_text_input(TextInputSessionId session) override;
+  void set_editable_rect(TextInputSessionId session, Rect rect) override;
+
+private:
+  std::weak_ptr<HostWindowState> state_;
 };
 
 } // namespace detail
@@ -56,6 +98,23 @@ struct HostWindowState {
 namespace {
 
 using State = detail::HostWindowState;
+
+class ForwardingTextInputClient final : public TextInputClient {
+public:
+  ForwardingTextInputClient(std::weak_ptr<State> state, TextInputSessionId session,
+                            std::uint64_t service, std::uint64_t callback_generation)
+    : state_(std::move(state)), session_(session), service_(service),
+      callback_generation_(callback_generation) {}
+
+  void update_editing_value(TextEditingValue value) override;
+  void perform_action(TextInputAction action) override;
+
+private:
+  std::weak_ptr<State> state_;
+  TextInputSessionId session_{};
+  std::uint64_t service_{};
+  std::uint64_t callback_generation_{};
+};
 
 void report_error(const std::shared_ptr<State>& state, HostErrorSource source,
                   std::exception_ptr failure) noexcept {
@@ -222,6 +281,9 @@ bool frame_generation_exhausted(const std::shared_ptr<State>& state) {
 void complete_platform_shutdown(const std::shared_ptr<State>& state) noexcept {
   std::shared_ptr<HostWindowControl> control;
   std::shared_ptr<AccessibilityAdapter> accessibility_adapter;
+  std::shared_ptr<TextInputBackend> text_backend;
+  std::shared_ptr<TextInputBackend> native_text_backend;
+  TextInputSessionId native_text_session{};
   {
     std::lock_guard lock{state->mutex};
     if (state->platform_shutdown_complete) {
@@ -231,7 +293,21 @@ void complete_platform_shutdown(const std::shared_ptr<State>& state) noexcept {
     state->platform_shutdown_complete = true;
     control = state->control;
     accessibility_adapter = std::move(state->accessibility_adapter);
+    text_backend = std::move(state->text_input_backend);
+    native_text_backend = std::move(state->native_text_backend);
+    native_text_session = std::exchange(state->native_text_session, 0);
+    state->native_text_client.reset();
   }
+  if (native_text_backend != nullptr && native_text_session != 0) {
+    try {
+      native_text_backend->stop_text_input(native_text_session);
+    } catch (...) {
+      report_error(state, HostErrorSource::shutdown, std::current_exception());
+    }
+  }
+  native_text_backend.reset();
+  text_backend.reset();
+  accessibility_adapter.reset();
   try {
     control->cancel_frame();
   } catch (...) {
@@ -242,7 +318,6 @@ void complete_platform_shutdown(const std::shared_ptr<State>& state) noexcept {
   } catch (...) {
     report_error(state, HostErrorSource::shutdown, std::current_exception());
   }
-  accessibility_adapter.reset();
 }
 
 bool schedule_platform_shutdown(const std::shared_ptr<State>& state) noexcept {
@@ -426,6 +501,273 @@ void dispatch_desired_semantics(const std::shared_ptr<State>& state) noexcept {
   }
 }
 
+void synchronize_text_input(const std::shared_ptr<State>& state) noexcept;
+
+bool schedule_text_sync(const std::shared_ptr<State>& state) noexcept {
+  {
+    std::lock_guard lock{state->mutex};
+    if (!state->running || state->text_sync_pending) {
+      return state->running;
+    }
+    state->text_sync_pending = true;
+  }
+  if (post_task(state, state->platform_runner.lock(), [state] { synchronize_text_input(state); })) {
+    return true;
+  }
+  {
+    std::lock_guard lock{state->mutex};
+    state->text_sync_pending = false;
+  }
+  detail::shutdown_host_window(state);
+  return false;
+}
+
+void synchronize_text_input(const std::shared_ptr<State>& state) noexcept {
+  try {
+    std::shared_ptr<TextInputBackend> stopped_backend;
+    TextInputSessionId stopped_session{};
+    {
+      std::lock_guard lock{state->mutex};
+      state->text_sync_pending = false;
+      if (state->text_session.has_value() && state->text_session->client.expired()) {
+        state->text_session.reset();
+      }
+      const bool native_is_current =
+        state->native_text_session != 0 && state->text_session.has_value() &&
+        state->native_text_backend == state->text_input_backend &&
+        state->native_text_service_generation == state->text_service_generation &&
+        state->native_text_public_session == state->text_session->id;
+      if (state->native_text_session != 0 && !native_is_current) {
+        stopped_backend = std::move(state->native_text_backend);
+        stopped_session = std::exchange(state->native_text_session, 0);
+        state->native_text_client.reset();
+        state->native_text_public_session = 0;
+        state->native_text_callback_generation = 0;
+        state->native_text_service_generation = 0;
+        state->native_text_callback_generation = 0;
+        state->native_text_value_revision = 0;
+        state->native_text_rect_revision = 0;
+      }
+    }
+    if (stopped_backend != nullptr) {
+      try {
+        stopped_backend->stop_text_input(stopped_session);
+      } catch (...) {
+        report_error(state, HostErrorSource::text_input, std::current_exception());
+      }
+    }
+
+    std::shared_ptr<TextInputBackend> backend;
+    std::shared_ptr<TextInputClient> forwarding;
+    std::optional<detail::HostTextSession> session;
+    std::uint64_t service{};
+    bool start{};
+    bool update_value{};
+    bool update_rect{};
+    TextInputSessionId native_session{};
+    std::uint64_t callback_generation{};
+    {
+      std::lock_guard lock{state->mutex};
+      if (!state->running || !state->text_session.has_value() ||
+          state->text_input_backend == nullptr) {
+        return;
+      }
+      backend = state->text_input_backend;
+      session = state->text_session;
+      service = state->text_service_generation;
+      native_session = state->native_text_session;
+      start = native_session == 0;
+      if (start) {
+        if (state->text_next_callback_generation == std::numeric_limits<std::uint64_t>::max()) {
+          throw std::overflow_error("Host native text callback generation exhausted");
+        }
+        callback_generation = state->text_next_callback_generation++;
+        forwarding = std::make_shared<ForwardingTextInputClient>(state, session->id, service,
+                                                                 callback_generation);
+      } else {
+        update_value = state->native_text_value_revision < session->value_revision;
+        update_rect = session->editable_rect.has_value() &&
+                      state->native_text_rect_revision < session->rect_revision;
+      }
+    }
+
+    if (start) {
+      TextInputSessionId started{};
+      try {
+        started = backend->start_text_input(forwarding, session->configuration, session->value);
+        if (started == 0) {
+          throw std::runtime_error("Text input backend returned a zero session");
+        }
+      } catch (...) {
+        report_error(state, HostErrorSource::text_input, std::current_exception());
+        return;
+      }
+      bool accepted{};
+      {
+        std::lock_guard lock{state->mutex};
+        accepted = state->running && state->text_session.has_value() &&
+                   state->text_session->id == session->id &&
+                   state->text_service_generation == service &&
+                   state->text_input_backend == backend && state->native_text_session == 0;
+        if (accepted) {
+          state->native_text_backend = backend;
+          state->native_text_client = std::move(forwarding);
+          state->native_text_session = started;
+          state->native_text_public_session = session->id;
+          state->native_text_service_generation = service;
+          state->native_text_callback_generation = callback_generation;
+          state->native_text_value_revision = session->value_revision;
+          state->native_text_rect_revision = 0;
+        }
+      }
+      if (!accepted) {
+        try {
+          backend->stop_text_input(started);
+        } catch (...) {
+          report_error(state, HostErrorSource::text_input, std::current_exception());
+        }
+        return;
+      }
+      static_cast<void>(schedule_text_sync(state));
+      return;
+    }
+
+    if (update_value) {
+      try {
+        backend->update_editing_state(native_session, session->value);
+        std::lock_guard lock{state->mutex};
+        if (state->native_text_session == native_session &&
+            state->native_text_service_generation == service) {
+          state->native_text_value_revision = session->value_revision;
+        }
+      } catch (...) {
+        report_error(state, HostErrorSource::text_input, std::current_exception());
+        {
+          std::lock_guard lock{state->mutex};
+          if (state->native_text_session == native_session &&
+              state->native_text_service_generation == service) {
+            state->native_text_public_session = 0;
+            state->native_text_callback_generation = 0;
+          }
+        }
+        static_cast<void>(schedule_text_sync(state));
+      }
+    }
+    if (update_rect) {
+      try {
+        backend->set_editable_rect(native_session, *session->editable_rect);
+        std::lock_guard lock{state->mutex};
+        if (state->native_text_session == native_session &&
+            state->native_text_service_generation == service) {
+          state->native_text_rect_revision = session->rect_revision;
+        }
+      } catch (...) {
+        report_error(state, HostErrorSource::text_input, std::current_exception());
+        {
+          std::lock_guard lock{state->mutex};
+          if (state->native_text_session == native_session &&
+              state->native_text_service_generation == service) {
+            state->native_text_public_session = 0;
+            state->native_text_callback_generation = 0;
+          }
+        }
+      }
+    }
+  } catch (...) {
+    report_error(state, HostErrorSource::text_input, std::current_exception());
+  }
+}
+
+void ForwardingTextInputClient::update_editing_value(TextEditingValue value) {
+  const std::shared_ptr<State> state = state_.lock();
+  if (state == nullptr || !value.valid()) {
+    return;
+  }
+  if (!post_task(state, state->ui_runner.lock(),
+                 [state, session = session_, service = service_,
+                  callback_generation = callback_generation_, value = std::move(value)]() mutable {
+                   std::shared_ptr<TextInputClient> client;
+                   bool exhausted{};
+                   {
+                     std::lock_guard lock{state->mutex};
+                     if (!state->running || !state->text_session.has_value() ||
+                         state->text_session->id != session ||
+                         state->text_service_generation != service ||
+                         state->native_text_callback_generation != callback_generation) {
+                       return;
+                     }
+                     client = state->text_session->client.lock();
+                     if (client == nullptr) {
+                       state->text_session.reset();
+                     } else if (state->text_session->value_revision ==
+                                std::numeric_limits<std::uint64_t>::max()) {
+                       exhausted = true;
+                     } else {
+                       state->text_session->value = value;
+                       ++state->text_session->value_revision;
+                       state->native_text_value_revision = state->text_session->value_revision;
+                     }
+                   }
+                   if (client == nullptr) {
+                     static_cast<void>(schedule_text_sync(state));
+                     return;
+                   }
+                   if (exhausted) {
+                     report_error(state, HostErrorSource::text_input,
+                                  std::make_exception_ptr(
+                                    std::overflow_error("Host text editing revision exhausted")));
+                     detail::shutdown_host_window(state);
+                     return;
+                   }
+                   try {
+                     client->update_editing_value(std::move(value));
+                   } catch (...) {
+                     report_error(state, HostErrorSource::text_input, std::current_exception());
+                   }
+                 })) {
+    detail::shutdown_host_window(state);
+  }
+}
+
+void ForwardingTextInputClient::perform_action(TextInputAction action) {
+  const std::shared_ptr<State> state = state_.lock();
+  const bool valid_action = action == TextInputAction::none || action == TextInputAction::done ||
+                            action == TextInputAction::next || action == TextInputAction::search ||
+                            action == TextInputAction::send;
+  if (state == nullptr || !valid_action) {
+    return;
+  }
+  if (!post_task(state, state->ui_runner.lock(),
+                 [state, session = session_, service = service_,
+                  callback_generation = callback_generation_, action] {
+                   std::shared_ptr<TextInputClient> client;
+                   {
+                     std::lock_guard lock{state->mutex};
+                     if (!state->running || !state->text_session.has_value() ||
+                         state->text_session->id != session ||
+                         state->text_service_generation != service ||
+                         state->native_text_callback_generation != callback_generation) {
+                       return;
+                     }
+                     client = state->text_session->client.lock();
+                     if (client == nullptr) {
+                       state->text_session.reset();
+                     }
+                   }
+                   if (client == nullptr) {
+                     static_cast<void>(schedule_text_sync(state));
+                     return;
+                   }
+                   try {
+                     client->perform_action(action);
+                   } catch (...) {
+                     report_error(state, HostErrorSource::text_input, std::current_exception());
+                   }
+                 })) {
+    detail::shutdown_host_window(state);
+  }
+}
+
 bool same_metrics(const WindowMetrics& current, Size logical_size, std::uint32_t physical_width,
                   std::uint32_t physical_height, double device_pixel_ratio) {
   return current.logical_size == logical_size && current.physical_width == physical_width &&
@@ -439,6 +781,112 @@ bool WindowMetrics::valid() const { return surface_request().valid(); }
 
 SurfaceRequest WindowMetrics::surface_request() const {
   return {logical_size, physical_width, physical_height, device_pixel_ratio, generation};
+}
+
+TextInputSessionId
+detail::HostTextInputProxy::start_text_input(std::weak_ptr<TextInputClient> client,
+                                             TextInputConfiguration configuration,
+                                             TextEditingValue initial_value) {
+  const std::shared_ptr<State> state = state_.lock();
+  const bool valid_action = configuration.action == TextInputAction::none ||
+                            configuration.action == TextInputAction::done ||
+                            configuration.action == TextInputAction::next ||
+                            configuration.action == TextInputAction::search ||
+                            configuration.action == TextInputAction::send;
+  if (state == nullptr || !initial_value.valid() || client.expired() || !valid_action) {
+    throw std::invalid_argument("Invalid host text input session");
+  }
+  TextInputSessionId session{};
+  {
+    std::lock_guard lock{state->mutex};
+    if (!state->running) {
+      throw std::logic_error("Cannot start text input on a stopped host window");
+    }
+    if (state->text_next_session == std::numeric_limits<TextInputSessionId>::max()) {
+      throw std::overflow_error("Host text input session generation exhausted");
+    }
+    session = state->text_next_session++;
+    state->text_session = detail::HostTextSession{
+      session, std::move(client), configuration, std::move(initial_value), std::nullopt, 1, 0};
+  }
+  if (!schedule_text_sync(state)) {
+    throw std::runtime_error("Could not schedule host text input start");
+  }
+  return session;
+}
+
+void detail::HostTextInputProxy::update_editing_state(TextInputSessionId session,
+                                                      TextEditingValue value) {
+  const std::shared_ptr<State> state = state_.lock();
+  if (state == nullptr) {
+    return;
+  }
+  {
+    std::lock_guard lock{state->mutex};
+    if (!state->running || !state->text_session.has_value() || state->text_session->id != session) {
+      return;
+    }
+  }
+  if (!value.valid()) {
+    throw std::invalid_argument("Invalid host text editing value");
+  }
+  {
+    std::lock_guard lock{state->mutex};
+    if (!state->running || !state->text_session.has_value() || state->text_session->id != session) {
+      return;
+    }
+    if (state->text_session->value_revision == std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("Host text editing revision exhausted");
+    }
+    state->text_session->value = std::move(value);
+    ++state->text_session->value_revision;
+  }
+  static_cast<void>(schedule_text_sync(state));
+}
+
+void detail::HostTextInputProxy::stop_text_input(TextInputSessionId session) {
+  const std::shared_ptr<State> state = state_.lock();
+  if (state == nullptr) {
+    return;
+  }
+  {
+    std::lock_guard lock{state->mutex};
+    if (!state->running || !state->text_session.has_value() || state->text_session->id != session) {
+      return;
+    }
+    state->text_session.reset();
+  }
+  static_cast<void>(schedule_text_sync(state));
+}
+
+void detail::HostTextInputProxy::set_editable_rect(TextInputSessionId session, Rect rect) {
+  const std::shared_ptr<State> state = state_.lock();
+  if (state == nullptr) {
+    return;
+  }
+  {
+    std::lock_guard lock{state->mutex};
+    if (!state->running || !state->text_session.has_value() || state->text_session->id != session) {
+      return;
+    }
+  }
+  if (!std::isfinite(rect.origin.x) || !std::isfinite(rect.origin.y) ||
+      !std::isfinite(rect.size.width) || !std::isfinite(rect.size.height) ||
+      rect.size.width < 0.0 || rect.size.height < 0.0) {
+    throw std::invalid_argument("Invalid host editable rectangle");
+  }
+  {
+    std::lock_guard lock{state->mutex};
+    if (!state->running || !state->text_session.has_value() || state->text_session->id != session) {
+      return;
+    }
+    if (state->text_session->rect_revision == std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("Host editable rectangle revision exhausted");
+    }
+    state->text_session->editable_rect = rect;
+    ++state->text_session->rect_revision;
+  }
+  static_cast<void>(schedule_text_sync(state));
 }
 
 DelegateBinding::~DelegateBinding() { reset(); }
@@ -510,6 +958,14 @@ std::shared_ptr<RasterSurface> HostWindow::raster_surface() const {
   }
   std::lock_guard lock{state_->mutex};
   return state_->running ? state_->raster_surface : nullptr;
+}
+
+std::shared_ptr<TextInputBackend> HostWindow::text_input_backend() const {
+  if (state_ == nullptr) {
+    return {};
+  }
+  std::lock_guard lock{state_->mutex};
+  return state_->running ? state_->text_input_proxy : nullptr;
 }
 
 DelegateBinding HostWindow::bind_delegate(std::weak_ptr<HostWindowDelegate> delegate) {
@@ -679,6 +1135,8 @@ void HostWindow::shutdown() noexcept {
       state_->shutdown_ui_pending = true;
       state_->frame_demand = false;
       state_->frame_armed = false;
+      state_->text_session.reset();
+      state_->text_sync_pending = false;
       if (state_->frame_generation != std::numeric_limits<std::uint64_t>::max()) {
         ++state_->frame_generation;
       }
@@ -1252,6 +1710,43 @@ std::optional<AccessibilityServiceId> HostWindowDriver::set_accessibility_adapte
   return service;
 }
 
+std::optional<TextInputServiceId>
+HostWindowDriver::set_text_input_backend(std::shared_ptr<TextInputBackend> backend) noexcept {
+  const std::shared_ptr<State> state = state_.lock();
+  if (state == nullptr) {
+    return std::nullopt;
+  }
+  std::lock_guard dispatch_lock{state->dispatch_mutex};
+  TextInputServiceId service;
+  std::shared_ptr<TextInputBackend> previous;
+  bool exhausted{};
+  {
+    std::lock_guard lock{state->mutex};
+    if (!state->running) {
+      return std::nullopt;
+    }
+    if (state->text_service_generation == std::numeric_limits<std::uint64_t>::max()) {
+      exhausted = true;
+    } else {
+      service = {++state->text_service_generation};
+      previous = std::move(state->text_input_backend);
+      state->text_input_backend = std::move(backend);
+    }
+  }
+  previous.reset();
+  if (exhausted) {
+    report_error(
+      state, HostErrorSource::text_input,
+      std::make_exception_ptr(std::overflow_error("Text input service generation exhausted")));
+    detail::shutdown_host_window(state);
+    return std::nullopt;
+  }
+  if (!schedule_text_sync(state)) {
+    return std::nullopt;
+  }
+  return service;
+}
+
 void HostWindowDriver::send_semantics_action(AccessibilityServiceId service, std::uint64_t node,
                                              SemanticsAction action) noexcept {
   const std::shared_ptr<State> state = state_.lock();
@@ -1351,6 +1846,7 @@ HostWindowEndpoints make_host_window(WindowId id, WindowConfiguration configurat
   state->control = std::move(control);
   state->raster_surface = std::move(raster_surface);
   state->error_handler = std::move(error_handler);
+  state->text_input_proxy = std::make_shared<detail::HostTextInputProxy>(state);
   return {HostWindow{state}, HostWindowDriver{state}};
 }
 

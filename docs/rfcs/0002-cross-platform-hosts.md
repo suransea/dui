@@ -248,7 +248,19 @@ replacing them. It is delivered as three independently reviewed commits:
   transactionally: throwing leaves that model unchanged.
 - P0b.2b attaches the optional text-input service. Text updates received before
   native start coalesce; replacement and stop invalidate stale public sessions,
-  and native backend sessions remain private to the coordinator.
+  and native backend sessions remain private to the coordinator. `HostWindow`
+  exposes a coordinator-backed implementation of the existing
+  `TextInputBackend`; it allocates a nonzero public session immediately and keeps
+  only a weak framework client. Each native forwarding client carries the
+  public session and text-service generation. Start, latest full editing value,
+  latest editable rectangle, replacement, and stop synchronize on the platform
+  executor. Backend replacement stops the old native session before starting
+  the current public session on the replacement. A stale public session is
+  ignored before value validation, and stale native value/action callbacks are
+  discarded on the UI executor. Backend exceptions preserve retryable desired
+  state; task-post failure stops the host. Shutdown invalidates the public
+  session before stopping and releasing native text objects on the platform
+  executor.
 - P0b.3 adds generation-bearing clipboard requests and coalesced cursor
   commands, then integrates all service invalidation and platform-affine release
   into host shutdown.

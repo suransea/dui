@@ -63,6 +63,7 @@ enum class HostErrorSource {
   delegate_callback,
   shutdown,
   accessibility,
+  text_input,
 };
 
 using HostErrorHandler = std::function<void(WindowId, HostErrorSource, std::exception_ptr)>;
@@ -91,6 +92,13 @@ struct AccessibilityServiceId {
 
   [[nodiscard]] constexpr bool valid() const noexcept { return value != 0; }
   friend constexpr auto operator<=>(AccessibilityServiceId, AccessibilityServiceId) = default;
+};
+
+struct TextInputServiceId {
+  std::uint64_t value{};
+
+  [[nodiscard]] constexpr bool valid() const noexcept { return value != 0; }
+  friend constexpr auto operator<=>(TextInputServiceId, TextInputServiceId) = default;
 };
 
 class HostWindowDelegate {
@@ -160,6 +168,7 @@ public:
   [[nodiscard]] bool valid() const noexcept;
   [[nodiscard]] std::optional<WindowMetrics> metrics() const;
   [[nodiscard]] std::shared_ptr<RasterSurface> raster_surface() const;
+  [[nodiscard]] std::shared_ptr<TextInputBackend> text_input_backend() const;
 
   [[nodiscard]] DelegateBinding bind_delegate(std::weak_ptr<HostWindowDelegate> delegate);
   [[nodiscard]] bool request_frame() noexcept;
@@ -200,6 +209,8 @@ public:
   void set_surface_state(HostSurfaceState state) noexcept;
   [[nodiscard]] std::optional<AccessibilityServiceId>
   set_accessibility_adapter(std::shared_ptr<AccessibilityAdapter> adapter) noexcept;
+  [[nodiscard]] std::optional<TextInputServiceId>
+  set_text_input_backend(std::shared_ptr<TextInputBackend> backend) noexcept;
   void send_semantics_action(AccessibilityServiceId service, std::uint64_t node,
                              SemanticsAction action) noexcept;
   void request_framework_close() noexcept;

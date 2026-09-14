@@ -63,7 +63,35 @@ Fake-host coverage includes publication before service installation, owned
 initial replay, latest-tree follow-up, apply failure and exact retry, publication
 during failure, retry from the error handler, retry/replacement races, stale and
 queued action invalidation, malformed actions, clear removals, and
-platform-affine shutdown release. P0b.2b text-input marshaling remains pending.
+platform-affine shutdown release. P0b.2b text-input marshaling is delivered below.
+
+### P0b.2b: Host Text-Input Service
+
+Status: H0 platform-neutral integration implemented and verified; native IME
+runtime evidence remains platform-specific.
+
+`HostWindow` exposes a coordinator-backed implementation of the existing
+`TextInputBackend`. Public sessions are allocated immediately and remain
+separate from native backend sessions. Desired full editing values and editable
+rectangles coalesce before platform execution. Service replacement stops the old
+native session and starts the current public session on the new backend. Native
+forwarding clients carry public-session, service, and native-instance
+generations before posting values/actions to the UI executor.
+
+Native edits update the retained full value before framework delivery, so
+backend replacement cannot regress text. Backend update failures invalidate and
+recreate native sessions because existing adapters may clear their session
+before throwing. Rectangle failure retains desired geometry but waits for a new
+framework command rather than entering an unbounded automatic restart loop.
+Expired framework clients, public stop/replacement, backend replacement, and
+shutdown invalidate queued callbacks before platform-affine native stop and
+release.
+
+Fake-host coverage includes start-before-service coalescing, latest value/rect,
+stale-before-validation behavior, framework updates, stop-before-callback,
+native-value retention across backend replacement, stale service and native-
+instance callbacks, update-failure recreation, explicit rectangle retry, client
+expiry, start retry, platform-post failure, and shutdown stop/release.
 
 ## M0: Headless Architecture
 
