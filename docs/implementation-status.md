@@ -269,8 +269,9 @@ the framework-facing shared-memory `RasterSurface` remain P1b.4b and P1b.4c.
 
 ## P1b.4b: Wayland Keyboard Repeat
 
-Status: implemented with H0 policy coverage; CI H1 native compilation is
-pending. Injected keyboard-repeat H2 remains pending.
+Status: implemented with H0 policy coverage and CI H1 native compilation.
+Injected keyboard-repeat H2 remains pending. The committed evidence is in
+`docs/evidence/linux-wayland-repeat-h1-2026-09-15.md`.
 
 `WaylandRepeatState` transactionally validates compositor timing, retains the
 newest repeatable candidate and its monotonic key-down time, preserves it across
