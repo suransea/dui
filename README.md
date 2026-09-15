@@ -89,6 +89,20 @@ from becoming markup.
 ./build/debug/dui_tooling_report > build/debug/tooling-report.html
 ```
 
+Additional headless examples are built by default:
+
+```sh
+./build/debug/dui_reactive_dashboard
+./build/debug/dui_interaction_semantics
+./build/debug/dui_lazy_list
+./build/debug/dui_restoration
+```
+
+They demonstrate Signal/Environment/state rebuilding, semantic activation and
+focus/key routing, visible-range lazy Sliver realization, and restoration into
+a replacement `BuildOwner`, respectively. Set `DUI_BUILD_EXAMPLES=OFF` to omit
+all example targets.
+
 Opt-in restoration supports replacement-owner hot restart for booleans,
 integers, and strings. Restoration IDs are caller-owned and globally unique;
 restored values are available during the replacement tree's first build. The
