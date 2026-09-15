@@ -641,9 +641,9 @@ struct WaylandWindow::Impl {
   wp_fractional_scale_v1* fractional_scale{};
   wl_pointer* pointer{};
   wl_keyboard* keyboard{};
-  xkb_context* xkb_context{};
-  xkb_keymap* xkb_keymap{};
-  xkb_state* xkb_state{};
+  xkb_context* xkb_context_handle{};
+  xkb_keymap* xkb_keymap_handle{};
+  xkb_state* xkb_state_handle{};
   std::shared_ptr<Control> control;
   HostWindowEndpoints endpoints;
   std::vector<std::unique_ptr<Buffer>> buffers;
@@ -936,17 +936,17 @@ struct WaylandWindow::Impl {
   }
 
   void destroy_xkb() noexcept {
-    if (xkb_state != nullptr) {
-      xkb_state_unref(xkb_state);
-      xkb_state = nullptr;
+    if (xkb_state_handle != nullptr) {
+      xkb_state_unref(xkb_state_handle);
+      xkb_state_handle = nullptr;
     }
-    if (xkb_keymap != nullptr) {
-      xkb_keymap_unref(xkb_keymap);
-      xkb_keymap = nullptr;
+    if (xkb_keymap_handle != nullptr) {
+      xkb_keymap_unref(xkb_keymap_handle);
+      xkb_keymap_handle = nullptr;
     }
-    if (xkb_context != nullptr) {
-      xkb_context_unref(xkb_context);
-      xkb_context = nullptr;
+    if (xkb_context_handle != nullptr) {
+      xkb_context_unref(xkb_context_handle);
+      xkb_context_handle = nullptr;
     }
     keyboard_state.clear_pressed();
   }
@@ -1064,18 +1064,18 @@ struct WaylandWindow::Impl {
                                            std::int32_t) noexcept {}
 
   WaylandKeyModifiers modifiers() const noexcept {
-    if (xkb_state == nullptr) {
+    if (xkb_state_handle == nullptr) {
       return {};
     }
     constexpr xkb_state_component component = XKB_STATE_MODS_EFFECTIVE;
-    return {xkb_state_mod_name_is_active(xkb_state, XKB_MOD_NAME_SHIFT, component) > 0,
-            xkb_state_mod_name_is_active(xkb_state, XKB_MOD_NAME_CTRL, component) > 0,
-            xkb_state_mod_name_is_active(xkb_state, "Mod1", component) > 0,
-            xkb_state_mod_name_is_active(xkb_state, "Mod4", component) > 0};
+    return {xkb_state_mod_name_is_active(xkb_state_handle, XKB_MOD_NAME_SHIFT, component) > 0,
+            xkb_state_mod_name_is_active(xkb_state_handle, XKB_MOD_NAME_CTRL, component) > 0,
+            xkb_state_mod_name_is_active(xkb_state_handle, "Mod1", component) > 0,
+            xkb_state_mod_name_is_active(xkb_state_handle, "Mod4", component) > 0};
   }
 
   std::string logical_key(xkb_keycode_t key) const {
-    const xkb_keysym_t symbol = xkb_state_key_get_one_sym(xkb_state, key);
+    const xkb_keysym_t symbol = xkb_state_key_get_one_sym(xkb_state_handle, key);
     switch (symbol) {
     case XKB_KEY_Return:
     case XKB_KEY_KP_Enter:
@@ -1101,7 +1101,7 @@ struct WaylandWindow::Impl {
     const std::uint32_t codepoint = xkb_keysym_to_utf32(symbol);
     if (codepoint >= 0x20U && codepoint != 0x7fU) {
       std::array<char, 64> text{};
-      const int length = xkb_state_key_get_utf8(xkb_state, key, text.data(), text.size());
+      const int length = xkb_state_key_get_utf8(xkb_state_handle, key, text.data(), text.size());
       if (length > 0 && static_cast<std::size_t>(length) < text.size()) {
         return {text.data(), static_cast<std::size_t>(length)};
       }
@@ -1191,9 +1191,9 @@ struct WaylandWindow::Impl {
       return;
     }
     self.destroy_xkb();
-    self.xkb_context = context;
-    self.xkb_keymap = keymap;
-    self.xkb_state = state;
+    self.xkb_context_handle = context;
+    self.xkb_keymap_handle = keymap;
+    self.xkb_state_handle = state;
   }
 
   static void handle_keyboard_enter(void* data, wl_keyboard*, std::uint32_t, wl_surface* surface,
@@ -1217,7 +1217,7 @@ struct WaylandWindow::Impl {
   static void handle_keyboard_key(void* data, wl_keyboard*, std::uint32_t, std::uint32_t,
                                   std::uint32_t key, std::uint32_t state) noexcept {
     auto& self = *static_cast<Impl*>(data);
-    if (self.xkb_state == nullptr || key > std::numeric_limits<xkb_keycode_t>::max() - 8U) {
+    if (self.xkb_state_handle == nullptr || key > std::numeric_limits<xkb_keycode_t>::max() - 8U) {
       self.fail_native();
       return;
     }
@@ -1246,9 +1246,9 @@ struct WaylandWindow::Impl {
                                         std::uint32_t depressed, std::uint32_t latched,
                                         std::uint32_t locked, std::uint32_t group) noexcept {
     auto& self = *static_cast<Impl*>(data);
-    if (self.xkb_state != nullptr) {
+    if (self.xkb_state_handle != nullptr) {
       static_cast<void>(
-        xkb_state_update_mask(self.xkb_state, depressed, latched, locked, 0, 0, group));
+        xkb_state_update_mask(self.xkb_state_handle, depressed, latched, locked, 0, 0, group));
     }
   }
 
