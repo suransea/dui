@@ -218,8 +218,9 @@ recreation follow in P1b.4.
 
 ## P1b.3a: Wayland Primary Pointer
 
-Status: implemented with H0 state coverage and local H1 native compilation.
-Injected pointer-event H2 remains pending.
+Status: implemented with H0 state coverage and CI H1 native compilation.
+Injected pointer-event H2 remains pending. The committed evidence is in
+`docs/evidence/linux-wayland-pointer-h1-2026-09-15.md`.
 
 This slice maps one primary-button pointer stream into the existing host input
 contract. `WaylandPointerState` provides H0 coverage for finite
