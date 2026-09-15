@@ -435,17 +435,41 @@ subset.
 P1b.4b uses the same poll set with a monotonic timer source.
 `xkb_keymap_key_repeats` is authoritative for eligibility. A repeatable key down
 arms the compositor-provided nonnegative delay/rate; rate zero, including a new
-repeat-info event, disables repeat. A newer repeatable down replaces the active
-key, while a non-repeatable down does not. Checked nanosecond conversion rejects
-unrepresentable timing. Timer expirations reuse `WaylandKeyboardState`'s held
-logical identity and current effective modifiers, advance the deadline by the
-reported expiration count, and bound event delivery per dispatch rather than
-entering an unbounded catch-up loop. When display and timer are both ready,
-Wayland events are read and dispatched first. Key up, focus or capability loss,
-keymap replacement, shutdown, and replacement therefore prevent repeat delivery
-after the cancellation event has been dispatched. H0 covers timer-independent
-repeat policy and H2 requires injected keyboard events plus elapsed timer
-delivery; object discovery alone remains insufficient.
+repeat-info event, disables client-generated repeat. This slice retains the
+negotiated `wl_keyboard` version 5; compositor-generated repeated key states from
+version 10 are deferred until that version is negotiated explicitly. A newer
+repeatable down replaces the active candidate, while a non-repeatable down does
+not. Releasing a non-active key is inert; releasing the active candidate disarms
+it without falling back to an older held key. Keymap replacement clears the
+candidate so later repeat-info cannot resurrect identity from the old map.
+
+Checked nanosecond conversion rejects unrepresentable timing, including rates
+for which `1'000'000'000 / rate` truncates to zero; other positive rates use that
+truncated positive nanosecond period. A zero delay is armed for one nanosecond so
+the first repeat enters a later dispatch rather than recursively following key
+down. The policy retains the candidate's monotonic key-down time. Repeat-info
+replacement transactionally updates timing and rearms a still-held candidate
+for `max(1ns, key_down_time + new_delay - now)`, preserving Wayland's delay-since-
+key-down meaning. A zero rate disarms but retains that candidate so a later
+positive rate may rearm it while held.
+
+Timer expirations reuse `WaylandKeyboardState`'s held logical identity and
+current effective modifiers. Reading `timerfd` drains its full accumulated
+expiration count while the periodic kernel schedule remains phase-anchored. At
+most 16 repeat events are delivered per dispatch; excess coalesced events are
+dropped rather than deferred into an unbounded callback loop. The timer fd is
+nonblocking and close-on-exec, is created and destroyed with the window on its
+owner thread, and is included in the connection poll set only while that window
+is registered. When display and timer are both ready, Wayland events are read
+and dispatched first, then the candidate generation is revalidated. A timer
+read retries `EINTR`, treats `EAGAIN` as benign stale readiness after display-
+side cancellation, and treats other read or arm failures as terminal native-
+host errors. Key up, focus or capability loss, keymap replacement, shutdown,
+and replacement therefore prevent repeat delivery after the cancellation event
+has been dispatched. H0 covers timer-independent repeat policy. Compile/link
+establishes repeat H1; repeat H2 requires injected focus, keymap, repeat-info,
+down, elapsed timer delivery, and up events. Object discovery alone does not
+establish repeat H2.
 
 P1b.4c supplies the host coordinator with a thread-safe `RasterSurface` whose
 acquisition allocates one checked memfd-backed storage transaction for the
