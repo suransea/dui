@@ -397,6 +397,86 @@ Executable stream tests establish H0 and the real SDK build establishes H1.
 Keyboard H2 requires injected focus, keymap, modifier, down, and up events; seat
 or keyboard-object discovery alone is not H2.
 
+P1b.4 is split at its ownership boundaries. P1b.4a makes connection dispatch
+wakeable, P1b.4b adds client-generated keyboard repeat, and P1b.4c replaces the
+diagnostic-only buffer path with a framework-facing shared-memory
+`RasterSurface` and recoverable buffer recreation. Each sub-slice is committed
+and verified independently; implementing one does not grant the claims of the
+later slices.
+
+P1b.4a replaces the blocking `wl_display_dispatch` call with the canonical
+prepared-read sequence around the display fd and one close-on-exec, nonblocking
+Linux `eventfd` owned by the task runner. Posting from any thread first secures
+one wake token and then enqueues while continuously holding the runner mutex, so
+the owner cannot consume the token between those operations. Interrupted writes
+retry; a saturated counter means a wake is already pending and is not a failure.
+A fatal wake failure leaves the task unqueued, preserving `TaskRunner::post`'s
+strong exception guarantee, while a spurious token caused by allocation failure
+is harmless. Owner-thread draining consumes pending wake tokens and executes
+tasks outside the mutex. The connection atomically closes the runner before its
+final drain; later posts throw without enqueueing, and retained runner handles
+may safely outlive the connection.
+
+Dispatch drains tasks and dispatches already queued Wayland events until
+`wl_display_prepare_read` succeeds, then flushes requests and polls the display
+and wake fds. A flush that would block adds writable interest and is retried when
+signaled. A successful display read is followed immediately by pending-event
+dispatch before tasks; every path that does not read first cancels the prepared
+read. Wake-only readiness cancels the read before draining tasks. Interrupted
+polls retry. Display errors, invalid descriptors, read failures, fatal flush
+failures, and callback failures retain the existing terminal transport behavior.
+Public methods and proxy ownership remain owner-thread affine.
+An H2 Weston test posts through the public runner from a worker while the owner
+is blocked in `dispatch()` and verifies owner-thread execution without a
+compositor event or polling delay. Real SDK compile/link is H1; the live
+cross-thread wake and clean shutdown under Weston are H2 for this event-loop
+subset.
+
+P1b.4b uses the same poll set with a monotonic timer source.
+`xkb_keymap_key_repeats` is authoritative for eligibility. A repeatable key down
+arms the compositor-provided nonnegative delay/rate; rate zero, including a new
+repeat-info event, disables repeat. A newer repeatable down replaces the active
+key, while a non-repeatable down does not. Checked nanosecond conversion rejects
+unrepresentable timing. Timer expirations reuse `WaylandKeyboardState`'s held
+logical identity and current effective modifiers, advance the deadline by the
+reported expiration count, and bound event delivery per dispatch rather than
+entering an unbounded catch-up loop. When display and timer are both ready,
+Wayland events are read and dispatched first. Key up, focus or capability loss,
+keymap replacement, shutdown, and replacement therefore prevent repeat delivery
+after the cancellation event has been dispatched. H0 covers timer-independent
+repeat policy and H2 requires injected keyboard events plus elapsed timer
+delivery; object discovery alone remains insufficient.
+
+P1b.4c supplies the host coordinator with a thread-safe `RasterSurface` whose
+acquisition allocates one checked memfd-backed storage transaction for the
+requested physical extent and metrics generation. Raster code writes through
+the existing RGBA8888 premultiplied byte contract; presentation explicitly
+converts it to advertised Wayland `ARGB8888` native packed-channel storage rather
+than treating `XRGB8888` bytes as compatible or discarding alpha.
+
+Present posts ownership to the Wayland thread and synchronously waits for that
+thread to accept or reject native submission. It returns `out_of_date` if
+metrics or surface generation changed, `lost` after terminal transport failure,
+and `presented` only after submission crosses the native commit boundary.
+Shutdown first closes acquisition and resolves queued or in-flight presentation
+waiters as `lost`; it never joins or waits for raster work while the raster
+thread is waiting for owner-thread acknowledgment. Abandon releases unsubmitted
+storage without issuing protocol requests. All Wayland proxy creation,
+attachment, and destruction remains on the owner thread. Buffer mappings may
+cross threads under transaction ownership; unsubmitted storage retires when
+raster ownership ends, successfully committed storage waits for
+`wl_buffer.release`, and terminal teardown force-retires all remaining storage.
+Recoverable native allocation failure occurs during acquisition and returns
+`SurfaceAcquireStatus::unavailable`; after a ready frame, presentation reports
+only stale `out_of_date` or terminal `lost` failures. A fresh matching
+acquisition can restore availability and repaint without reusing a consumed
+configure serial. The diagnostic fill remains only a test renderer. H0 covers
+abandon, transaction races, stale generations, conversion, and shutdown
+ordering. H2 under Weston covers diagnostic `wl_shm` creation and commit,
+observed release after replacement or detachment, resize/scale invalidation,
+recreation, and sanitizer-clean shutdown; it does not claim production renderer
+completion.
+
 Implement the Wayland host first. The client performs an initial bufferless
 commit to trigger `xdg_surface.configure`, waits for configure, coalesces
 superseded configure events, acknowledges the latest configure it applies, and
