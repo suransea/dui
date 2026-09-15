@@ -75,6 +75,8 @@ int main() {
             "scaled Wayland commit did not publish matching host metrics");
     require(status.pointer_available == final_globals.pointer_available(),
             "Wayland pointer object did not follow the advertised seat capability");
+    require(status.keyboard_available == final_globals.keyboard_available(),
+            "Wayland keyboard object did not follow the advertised seat capability");
     if (delegate->frames.size() != 1 || delegate->frames.front().window != dui::WindowId{1} ||
         delegate->frames.front().timestamp < std::chrono::nanoseconds::zero() ||
         delegate->frames.front().metrics.physical_width != 640 ||

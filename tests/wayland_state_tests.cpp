@@ -239,6 +239,41 @@ void primary_pointer_state_preserves_stream_invariants() {
           "non-finite pointer coordinates were accepted");
 }
 
+void keyboard_state_preserves_logical_identity_and_focus() {
+  using dui::KeyPhase;
+  using dui::platform::WaylandKeyboardState;
+  using dui::platform::WaylandKeyModifiers;
+
+  WaylandKeyboardState state;
+  require(!state.key_down(30, "a", {}).has_value() && !state.key_up(30, {}).has_value(),
+          "unfocused Wayland keyboard invented events");
+  state.focus_gained();
+  require(throws<std::invalid_argument>([&] { static_cast<void>(state.key_down(30, "", {})); }),
+          "empty logical key was accepted");
+  const auto down = state.key_down(30, "a", {.shift = true});
+  const auto repeat = state.key_repeat(30, {.control = true});
+  require(down.has_value() && down->logical_key == "a" && down->phase == KeyPhase::down &&
+            down->shift && repeat.has_value() && repeat->logical_key == "a" &&
+            repeat->phase == KeyPhase::repeat && repeat->control,
+          "keyboard down/repeat lost logical identity or modifiers");
+  require(throws<std::logic_error>([&] { static_cast<void>(state.key_down(30, "A", {})); }),
+          "duplicate key down was accepted");
+  const auto up = state.key_up(30, {.alt = true, .meta = true});
+  require(up.has_value() && up->logical_key == "a" && up->phase == KeyPhase::up && up->alt &&
+            up->meta && state.pressed_count() == 0 && !state.key_up(30, {}).has_value(),
+          "keyboard up renamed the held key or unmatched release produced an event");
+
+  static_cast<void>(state.key_down(31, "s", {}));
+  state.clear_pressed();
+  require(state.focused() && state.pressed_count() == 0,
+          "keymap replacement did not preserve focus while clearing held keys");
+  static_cast<void>(state.key_down(32, "d", {}));
+  state.focus_lost();
+  require(!state.focused() && state.pressed_count() == 0 &&
+            !state.key_repeat(32, WaylandKeyModifiers{}).has_value(),
+          "keyboard focus loss retained held-key state");
+}
+
 } // namespace
 
 int main() {
@@ -249,6 +284,7 @@ int main() {
     frame_callbacks_gate_content_without_blocking_configure();
     scale_changes_replace_frames_without_accepting_stale_generations();
     primary_pointer_state_preserves_stream_invariants();
+    keyboard_state_preserves_logical_identity_and_focus();
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';
     return 1;

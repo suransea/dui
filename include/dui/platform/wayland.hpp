@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <unordered_map>
 
 namespace dui::platform {
 
@@ -56,6 +57,35 @@ private:
   Offset position_;
   bool focused_{};
   bool active_{};
+};
+
+struct WaylandKeyModifiers {
+  bool shift{};
+  bool control{};
+  bool alt{};
+  bool meta{};
+};
+
+class WaylandKeyboardState {
+public:
+  void focus_gained() noexcept { focused_ = true; }
+  void focus_lost() noexcept;
+  void clear_pressed() noexcept { pressed_.clear(); }
+
+  [[nodiscard]] std::optional<KeyEvent> key_down(std::uint32_t key, std::string logical_key,
+                                                 WaylandKeyModifiers modifiers);
+  [[nodiscard]] std::optional<KeyEvent> key_repeat(std::uint32_t key,
+                                                   WaylandKeyModifiers modifiers) const;
+  [[nodiscard]] std::optional<KeyEvent> key_up(std::uint32_t key, WaylandKeyModifiers modifiers);
+
+  [[nodiscard]] bool focused() const noexcept { return focused_; }
+  [[nodiscard]] std::size_t pressed_count() const noexcept { return pressed_.size(); }
+
+private:
+  static KeyEvent event(std::string logical_key, KeyPhase phase, WaylandKeyModifiers modifiers);
+
+  std::unordered_map<std::uint32_t, std::string> pressed_;
+  bool focused_{};
 };
 
 // Platform-neutral protocol state used by the native Wayland adapter. All

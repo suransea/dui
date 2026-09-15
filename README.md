@@ -186,6 +186,10 @@ diagnostic buffer and publish matching physical metrics and device-pixel ratio.
 P1b.3a adds seat capability tracking and a primary-button `wl_pointer` adapter.
 Its platform-neutral state tests cover complete and canceled pointer streams;
 native event H2 remains pending a compositor-side input injector.
+P1b.3b adds bounded transactional XKB V1 keymaps, keyboard focus, canonical
+logical key translation, effective modifiers, and stable down/repeat/up
+identity. Client-timer repeat generation and injected keyboard H2 remain later
+work.
 
 ## Build
 

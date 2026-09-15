@@ -26,6 +26,9 @@ struct WaylandGlobals {
   [[nodiscard]] constexpr bool pointer_available() const noexcept {
     return (seat_capabilities & 1U) != 0;
   }
+  [[nodiscard]] constexpr bool keyboard_available() const noexcept {
+    return (seat_capabilities & 2U) != 0;
+  }
   friend constexpr bool operator==(WaylandGlobals, WaylandGlobals) = default;
 };
 
@@ -63,6 +66,7 @@ struct WaylandWindowStatus {
   std::uint32_t scale_numerator{120};
   bool uses_viewporter{};
   bool pointer_available{};
+  bool keyboard_available{};
 };
 
 class WaylandWindow {

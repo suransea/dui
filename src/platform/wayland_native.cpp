@@ -7,6 +7,8 @@
 #include "xdg-shell-client-protocol.h"
 
 #include <wayland-client.h>
+#include <xkbcommon/xkbcommon-keysyms.h>
+#include <xkbcommon/xkbcommon.h>
 
 #include <algorithm>
 #include <array>
@@ -26,6 +28,7 @@
 #include <linux/memfd.h>
 #include <linux/input-event-codes.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -212,6 +215,7 @@ struct WaylandConnection::Impl {
   void (*active_output_changed)(void*, wl_output*, bool) noexcept {};
   void (*active_seat_changed)(void*, std::uint32_t) noexcept {};
   bool active_pointer_child{};
+  bool active_keyboard_child{};
 
   ~Impl() {
     if (std::this_thread::get_id() != owner || active_windows != 0) {
@@ -435,8 +439,9 @@ struct WaylandConnection::Impl {
       (kind == GlobalKind::compositor && name == compositor_name && compositor != nullptr);
     const bool has_active_children =
       kind == GlobalKind::compositor || kind == GlobalKind::shm ||
-      (kind == GlobalKind::seat && active_pointer_child) || kind == GlobalKind::wm_base ||
-      kind == GlobalKind::viewporter || kind == GlobalKind::fractional_scale;
+      (kind == GlobalKind::seat && (active_pointer_child || active_keyboard_child)) ||
+      kind == GlobalKind::wm_base || kind == GlobalKind::viewporter ||
+      kind == GlobalKind::fractional_scale;
     if (selected && active_windows != 0 && has_active_children) {
       deferred_removals[static_cast<std::size_t>(kind)] = name;
       return;
@@ -635,6 +640,10 @@ struct WaylandWindow::Impl {
   wp_viewport* viewport{};
   wp_fractional_scale_v1* fractional_scale{};
   wl_pointer* pointer{};
+  wl_keyboard* keyboard{};
+  xkb_context* xkb_context{};
+  xkb_keymap* xkb_keymap{};
+  xkb_state* xkb_state{};
   std::shared_ptr<Control> control;
   HostWindowEndpoints endpoints;
   std::vector<std::unique_ptr<Buffer>> buffers;
@@ -648,6 +657,9 @@ struct WaylandWindow::Impl {
   bool committed_with_viewporter{};
   std::vector<wl_output*> entered_outputs;
   WaylandPointerState pointer_state;
+  WaylandKeyboardState keyboard_state;
+  std::int32_t repeat_rate{};
+  std::int32_t repeat_delay{};
   bool native_running{true};
   bool registered{};
 
@@ -807,6 +819,7 @@ struct WaylandWindow::Impl {
     }
     native_running = false;
     destroy_pointer();
+    destroy_keyboard();
     frame.reset();
     buffers.clear();
     if (fractional_scale != nullptr) {
@@ -922,7 +935,43 @@ struct WaylandWindow::Impl {
     pointer = nullptr;
   }
 
-  void seat_capabilities_changed(std::uint32_t capabilities) noexcept {
+  void destroy_xkb() noexcept {
+    if (xkb_state != nullptr) {
+      xkb_state_unref(xkb_state);
+      xkb_state = nullptr;
+    }
+    if (xkb_keymap != nullptr) {
+      xkb_keymap_unref(xkb_keymap);
+      xkb_keymap = nullptr;
+    }
+    if (xkb_context != nullptr) {
+      xkb_context_unref(xkb_context);
+      xkb_context = nullptr;
+    }
+    keyboard_state.clear_pressed();
+  }
+
+  void destroy_keyboard() noexcept {
+    if (keyboard_state.focused()) {
+      keyboard_state.focus_lost();
+      endpoints.driver.set_focused(false);
+    } else {
+      keyboard_state.clear_pressed();
+    }
+    destroy_xkb();
+    connection->active_keyboard_child = false;
+    if (keyboard == nullptr) {
+      return;
+    }
+    if (wl_keyboard_get_version(keyboard) >= WL_KEYBOARD_RELEASE_SINCE_VERSION) {
+      wl_keyboard_release(keyboard);
+    } else {
+      wl_keyboard_destroy(keyboard);
+    }
+    keyboard = nullptr;
+  }
+
+  void seat_pointer_capabilities_changed(std::uint32_t capabilities) noexcept {
     const bool available = (capabilities & WL_SEAT_CAPABILITY_POINTER) != 0;
     if (!available) {
       destroy_pointer();
@@ -1013,6 +1062,206 @@ struct WaylandWindow::Impl {
   static void handle_pointer_axis_stop(void*, wl_pointer*, std::uint32_t, std::uint32_t) noexcept {}
   static void handle_pointer_axis_discrete(void*, wl_pointer*, std::uint32_t,
                                            std::int32_t) noexcept {}
+
+  WaylandKeyModifiers modifiers() const noexcept {
+    if (xkb_state == nullptr) {
+      return {};
+    }
+    constexpr xkb_state_component component = XKB_STATE_MODS_EFFECTIVE;
+    return {xkb_state_mod_name_is_active(xkb_state, XKB_MOD_NAME_SHIFT, component) > 0,
+            xkb_state_mod_name_is_active(xkb_state, XKB_MOD_NAME_CTRL, component) > 0,
+            xkb_state_mod_name_is_active(xkb_state, "Mod1", component) > 0,
+            xkb_state_mod_name_is_active(xkb_state, "Mod4", component) > 0};
+  }
+
+  std::string logical_key(xkb_keycode_t key) const {
+    const xkb_keysym_t symbol = xkb_state_key_get_one_sym(xkb_state, key);
+    switch (symbol) {
+    case XKB_KEY_Return:
+    case XKB_KEY_KP_Enter:
+      return "Enter";
+    case XKB_KEY_Escape:
+      return "Escape";
+    case XKB_KEY_BackSpace:
+      return "Backspace";
+    case XKB_KEY_Tab:
+    case XKB_KEY_ISO_Left_Tab:
+      return "Tab";
+    case XKB_KEY_Left:
+      return "ArrowLeft";
+    case XKB_KEY_Right:
+      return "ArrowRight";
+    case XKB_KEY_Up:
+      return "ArrowUp";
+    case XKB_KEY_Down:
+      return "ArrowDown";
+    default:
+      break;
+    }
+    const std::uint32_t codepoint = xkb_keysym_to_utf32(symbol);
+    if (codepoint >= 0x20U && codepoint != 0x7fU) {
+      std::array<char, 64> text{};
+      const int length = xkb_state_key_get_utf8(xkb_state, key, text.data(), text.size());
+      if (length > 0 && static_cast<std::size_t>(length) < text.size()) {
+        return {text.data(), static_cast<std::size_t>(length)};
+      }
+    }
+    std::array<char, 128> name{};
+    const int length = xkb_keysym_get_name(symbol, name.data(), name.size());
+    if (length <= 0 || static_cast<std::size_t>(length) >= name.size()) {
+      throw std::runtime_error("Could not name Wayland keyboard symbol");
+    }
+    return {name.data(), static_cast<std::size_t>(length)};
+  }
+
+  void seat_keyboard_capabilities_changed(std::uint32_t capabilities) noexcept {
+    const bool available = (capabilities & WL_SEAT_CAPABILITY_KEYBOARD) != 0;
+    if (!available) {
+      destroy_keyboard();
+      return;
+    }
+    if (keyboard != nullptr || !native_running) {
+      return;
+    }
+    keyboard = wl_seat_get_keyboard(connection->seat);
+    if (keyboard == nullptr) {
+      fail_native();
+      return;
+    }
+    connection->active_keyboard_child = true;
+    static constexpr wl_keyboard_listener listener{
+      handle_keyboard_keymap, handle_keyboard_enter,     handle_keyboard_leave,
+      handle_keyboard_key,    handle_keyboard_modifiers, handle_keyboard_repeat_info};
+    if (wl_keyboard_add_listener(keyboard, &listener, this) != 0) {
+      destroy_keyboard();
+      fail_native();
+    }
+  }
+
+  static void handle_keyboard_keymap(void* data, wl_keyboard*, std::uint32_t format,
+                                     std::int32_t fd, std::uint32_t size) noexcept {
+    auto& self = *static_cast<Impl*>(data);
+    constexpr std::uint32_t maximum_keymap_size = 64U * 1024U * 1024U;
+    if (fd < 0 || format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 || size == 0 ||
+        size > maximum_keymap_size) {
+      if (fd >= 0) {
+        close(fd);
+      }
+      self.fail_native();
+      return;
+    }
+    struct stat descriptor_status {};
+    if (fstat(fd, &descriptor_status) != 0 || descriptor_status.st_size < 0 ||
+        static_cast<std::uint64_t>(descriptor_status.st_size) < size) {
+      close(fd);
+      self.fail_native();
+      return;
+    }
+    void* mapping = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    const void* terminator =
+      mapping == MAP_FAILED ? nullptr : std::memchr(mapping, '\0', static_cast<std::size_t>(size));
+    if (mapping == MAP_FAILED ||
+        terminator != static_cast<const char*>(mapping) + static_cast<std::size_t>(size) - 1U) {
+      if (mapping != MAP_FAILED) {
+        munmap(mapping, size);
+      }
+      self.fail_native();
+      return;
+    }
+    xkb_context* context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    xkb_keymap* keymap =
+      context == nullptr
+        ? nullptr
+        : xkb_keymap_new_from_string(context, static_cast<const char*>(mapping),
+                                     XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    xkb_state* state = keymap == nullptr ? nullptr : xkb_state_new(keymap);
+    munmap(mapping, size);
+    if (context == nullptr || keymap == nullptr || state == nullptr) {
+      if (state != nullptr) {
+        xkb_state_unref(state);
+      }
+      if (keymap != nullptr) {
+        xkb_keymap_unref(keymap);
+      }
+      if (context != nullptr) {
+        xkb_context_unref(context);
+      }
+      self.fail_native();
+      return;
+    }
+    self.destroy_xkb();
+    self.xkb_context = context;
+    self.xkb_keymap = keymap;
+    self.xkb_state = state;
+  }
+
+  static void handle_keyboard_enter(void* data, wl_keyboard*, std::uint32_t, wl_surface* surface,
+                                    wl_array*) noexcept {
+    auto& self = *static_cast<Impl*>(data);
+    if (surface == self.surface) {
+      self.keyboard_state.focus_gained();
+      self.endpoints.driver.set_focused(true);
+    }
+  }
+
+  static void handle_keyboard_leave(void* data, wl_keyboard*, std::uint32_t,
+                                    wl_surface* surface) noexcept {
+    auto& self = *static_cast<Impl*>(data);
+    if (surface == self.surface) {
+      self.keyboard_state.focus_lost();
+      self.endpoints.driver.set_focused(false);
+    }
+  }
+
+  static void handle_keyboard_key(void* data, wl_keyboard*, std::uint32_t, std::uint32_t,
+                                  std::uint32_t key, std::uint32_t state) noexcept {
+    auto& self = *static_cast<Impl*>(data);
+    if (self.xkb_state == nullptr || key > std::numeric_limits<xkb_keycode_t>::max() - 8U) {
+      self.fail_native();
+      return;
+    }
+    try {
+      const xkb_keycode_t xkb_key = static_cast<xkb_keycode_t>(key + 8U);
+      if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+        const auto event =
+          self.keyboard_state.key_down(key, self.logical_key(xkb_key), self.modifiers());
+        if (event.has_value()) {
+          self.endpoints.driver.send_key(*event);
+        }
+      } else if (state == WL_KEYBOARD_KEY_STATE_RELEASED) {
+        const auto event = self.keyboard_state.key_up(key, self.modifiers());
+        if (event.has_value()) {
+          self.endpoints.driver.send_key(*event);
+        }
+      } else {
+        throw std::invalid_argument("Unknown Wayland keyboard key state");
+      }
+    } catch (...) {
+      self.fail_native();
+    }
+  }
+
+  static void handle_keyboard_modifiers(void* data, wl_keyboard*, std::uint32_t,
+                                        std::uint32_t depressed, std::uint32_t latched,
+                                        std::uint32_t locked, std::uint32_t group) noexcept {
+    auto& self = *static_cast<Impl*>(data);
+    if (self.xkb_state != nullptr) {
+      static_cast<void>(
+        xkb_state_update_mask(self.xkb_state, depressed, latched, locked, 0, 0, group));
+    }
+  }
+
+  static void handle_keyboard_repeat_info(void* data, wl_keyboard*, std::int32_t rate,
+                                          std::int32_t delay) noexcept {
+    auto& self = *static_cast<Impl*>(data);
+    if (rate < 0 || delay < 0) {
+      self.fail_native();
+      return;
+    }
+    self.repeat_rate = rate;
+    self.repeat_delay = delay;
+  }
 
   static void handle_toplevel_configure(void* data, xdg_toplevel*, std::int32_t width,
                                         std::int32_t height, wl_array*) noexcept {
@@ -1133,7 +1382,9 @@ std::unique_ptr<WaylandWindow> WaylandWindow::create(WaylandConnection& connecti
     static_cast<Impl*>(window)->output_changed(output, removed);
   };
   connection.impl_->active_seat_changed = [](void* window, std::uint32_t capabilities) noexcept {
-    static_cast<Impl*>(window)->seat_capabilities_changed(capabilities);
+    auto& impl = *static_cast<Impl*>(window);
+    impl.seat_pointer_capabilities_changed(capabilities);
+    impl.seat_keyboard_capabilities_changed(capabilities);
   };
   impl->surface = wl_compositor_create_surface(connection.impl_->compositor);
   if (impl->surface == nullptr) {
@@ -1190,7 +1441,8 @@ std::unique_ptr<WaylandWindow> WaylandWindow::create(WaylandConnection& connecti
     make_host_window(id, std::move(configuration), connection.impl_->runner,
                      connection.impl_->runner, impl->control, nullptr, std::move(error_handler));
   impl->endpoints.driver.set_surface_state(HostSurfaceState::available);
-  impl->seat_capabilities_changed(connection.impl_->globals.seat_capabilities);
+  impl->seat_pointer_capabilities_changed(connection.impl_->globals.seat_capabilities);
+  impl->seat_keyboard_capabilities_changed(connection.impl_->globals.seat_capabilities);
   if (!impl->surface_state.begin_initial_commit()) {
     throw std::logic_error("Wayland initial commit state was already consumed");
   }
@@ -1209,10 +1461,10 @@ HostWindow WaylandWindow::window() const {
 
 WaylandWindowStatus WaylandWindow::status() const {
   impl_->connection->require_owner();
-  return {impl_->surface_state.configured(), impl_->committed_buffers,
-          impl_->frame != nullptr,           impl_->committed_extent.width,
-          impl_->committed_extent.height,    impl_->committed_scale,
-          impl_->committed_with_viewporter,  impl_->pointer != nullptr};
+  return {
+    impl_->surface_state.configured(), impl_->committed_buffers,       impl_->frame != nullptr,
+    impl_->committed_extent.width,     impl_->committed_extent.height, impl_->committed_scale,
+    impl_->committed_with_viewporter,  impl_->pointer != nullptr,      impl_->keyboard != nullptr};
 }
 
 } // namespace dui::platform

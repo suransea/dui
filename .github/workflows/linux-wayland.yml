@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install Wayland SDK
-        run: sudo apt-get update && sudo apt-get install -y libwayland-dev wayland-protocols weston
+        run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev wayland-protocols weston
       - name: Configure
         run: cmake -S . -B build/wayland -G Ninja -DCMAKE_BUILD_TYPE=Debug -DDUI_ENABLE_SANITIZERS=ON -DDUI_REQUIRE_WAYLAND_NATIVE=ON
       - name: Build

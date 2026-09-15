@@ -83,6 +83,58 @@ std::optional<PointerEvent> WaylandPointerState::capability_lost() noexcept {
   return PointerEvent{pointer_, PointerPhase::cancel, position_};
 }
 
+void WaylandKeyboardState::focus_lost() noexcept {
+  focused_ = false;
+  pressed_.clear();
+}
+
+KeyEvent WaylandKeyboardState::event(std::string logical_key, KeyPhase phase,
+                                     WaylandKeyModifiers modifiers) {
+  return {std::move(logical_key), phase,         modifiers.shift,
+          modifiers.control,      modifiers.alt, modifiers.meta};
+}
+
+std::optional<KeyEvent> WaylandKeyboardState::key_down(std::uint32_t key, std::string logical_key,
+                                                       WaylandKeyModifiers modifiers) {
+  if (!focused_) {
+    return std::nullopt;
+  }
+  if (logical_key.empty() || !is_valid_utf8(logical_key)) {
+    throw std::invalid_argument("Wayland logical key must be non-empty UTF-8");
+  }
+  const auto [position, inserted] = pressed_.try_emplace(key, std::move(logical_key));
+  if (!inserted) {
+    throw std::logic_error("Wayland key is already pressed");
+  }
+  return event(position->second, KeyPhase::down, modifiers);
+}
+
+std::optional<KeyEvent> WaylandKeyboardState::key_repeat(std::uint32_t key,
+                                                         WaylandKeyModifiers modifiers) const {
+  if (!focused_) {
+    return std::nullopt;
+  }
+  const auto pressed = pressed_.find(key);
+  if (pressed == pressed_.end()) {
+    return std::nullopt;
+  }
+  return event(pressed->second, KeyPhase::repeat, modifiers);
+}
+
+std::optional<KeyEvent> WaylandKeyboardState::key_up(std::uint32_t key,
+                                                     WaylandKeyModifiers modifiers) {
+  if (!focused_) {
+    return std::nullopt;
+  }
+  const auto pressed = pressed_.find(key);
+  if (pressed == pressed_.end()) {
+    return std::nullopt;
+  }
+  std::string logical_key = std::move(pressed->second);
+  pressed_.erase(pressed);
+  return event(std::move(logical_key), KeyPhase::up, modifiers);
+}
+
 bool WaylandCommit::valid() const noexcept {
   if (generation == 0 || state_revision == 0 || !logical_extent.valid() || !buffer_extent.valid() ||
       buffer_scale == 0 ||
