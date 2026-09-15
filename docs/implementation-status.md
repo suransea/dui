@@ -235,8 +235,9 @@ it does not elevate pointer events to H2. Keyboard/xkbcommon follows as P1b.3b.
 
 ## P1b.3b: Wayland Keyboard And Xkbcommon
 
-Status: implemented with H0 stream coverage; CI H1 compilation is pending.
-Injected keyboard-event H2 remains pending.
+Status: implemented with H0 stream coverage and CI H1 native compilation.
+Injected keyboard-event H2 remains pending. The committed evidence is in
+`docs/evidence/linux-wayland-keyboard-h1-2026-09-15.md`.
 
 This slice owns the keyboard capability object and transactional XKB V1 keymap
 fd replacement, maps native focus into `HostWindowDriver`, translates layout
