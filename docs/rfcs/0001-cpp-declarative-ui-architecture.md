@@ -2,7 +2,24 @@
 
 - Status: Accepted for prototype
 - Target: DUI 0.1
-- Last updated: 2026-09-13
+- Last updated: 2026-09-15
+
+## Executable Examples
+
+Examples are small headless embedding programs, not alternate test suites or
+mock native applications. Every example must use only public `dui` headers,
+build with `DUI_BUILD_EXAMPLES=ON`, run without platform SDKs or network access,
+and emit deterministic text suitable for inspection from a terminal. An example
+must demonstrate a complete user-facing concept rather than duplicate a unit-
+test fixture.
+
+The initial example set covers four independent paths: local state plus external
+Signal and Environment dependencies; semantics activation plus focus/key
+routing; visible-range lazy Sliver realization across scrolling; and detached
+restoration into a replacement `BuildOwner`. Existing counter and tooling-report
+programs remain the minimal state and offline-inspection introductions. Example
+executables are smoke-run during verification, while behavioral edge cases stay
+in the corresponding test executables.
 
 ## Summary
 
