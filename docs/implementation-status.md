@@ -253,7 +253,9 @@ joins the wakeable event-loop work in P1b.4.
 
 ## P1b.4a: Wakeable Wayland Dispatch
 
-Status: implemented; CI H1/H2 verification is pending.
+Status: implemented and H2 verified under headless Weston. The committed
+evidence is in
+`docs/evidence/linux-wayland-dispatch-h2-2026-09-15.md`.
 
 The connection task runner owns a nonblocking close-on-exec `eventfd`. Posts
 from any thread signal and enqueue atomically with respect to owner draining,
