@@ -352,10 +352,29 @@ and publishes matching physical extent and device-pixel ratio through
 an effective 240/120 scale, doubled physical dimensions, frame delivery, and
 sanitizer-clean shutdown. It verifies viewport use as well when the compositor
 advertises both optional protocols; otherwise the generated and linked
-fractional path remains H1 until an H2 compositor advertises it. P1b.3 adds seat
-capability, pointer, and keyboard/xkbcommon input. P1b.4 adds wakeable
-cross-thread dispatch, a framework-facing `RasterSurface`, and recoverable
-surface recreation.
+fractional path remains H1 until an H2 compositor advertises it. P1b.4 adds
+wakeable cross-thread dispatch, a framework-facing `RasterSurface`, and
+recoverable surface recreation.
+
+P1b.3 is split by the translation boundary. P1b.3a adds a platform-neutral
+primary-pointer state machine and the native seat/pointer lifecycle. The state
+machine owns one stable pointer ID, stores finite surface-local coordinates,
+emits no hover event, maps the primary button to `down`/`up`, maps motion only
+while pressed, and emits `cancel` on surface leave, pointer capability loss, or
+shutdown. Duplicate press is invalid; release without an observed press is
+ignored so capability acquisition in the middle of a physical stream does not
+invent a down event. The native connection listens to seat capabilities and
+creates at most one `wl_pointer`; the window accepts events only while the
+pointer focuses its own `wl_surface`. Non-primary buttons and axes remain
+unrepresented until the framework input value grows those fields. Seat removal
+is deferred while a pointer child exists, and every C callback contains
+allocation and validation failures before entering `HostWindowDriver`.
+Executable state tests establish H0 and real SDK compilation establishes H1.
+Headless Weston establishes pointer H2 only when an input injector or advertised
+pointer capability actually drives enter, primary down, motion, up, and leave;
+mere seat discovery is not pointer H2. P1b.3b adds keyboard focus, keymap fd
+ownership, xkbcommon state/modifier translation, repeat classification, and the
+same capability-loss cancellation discipline.
 
 Implement the Wayland host first. The client performs an initial bufferless
 commit to trigger `xdg_surface.configure`, waits for configure, coalesces
