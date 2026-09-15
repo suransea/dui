@@ -45,6 +45,7 @@ public:
   // affinity terminates rather than releasing live proxies unsafely.
   [[nodiscard]] std::shared_ptr<TaskRunner> task_runner() const;
   void run_pending();
+  // Blocks until one display event or cross-thread task is dispatched.
   void dispatch();
   void roundtrip();
   [[nodiscard]] WaylandGlobals globals() const;

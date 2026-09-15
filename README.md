@@ -190,6 +190,10 @@ P1b.3b adds bounded transactional XKB V1 keymaps, keyboard focus, canonical
 logical key translation, effective modifiers, and stable down/repeat/up
 identity. Client-timer repeat generation and injected keyboard H2 remain later
 work.
+P1b.4a replaces blocking display-only dispatch with a prepared-read poll over
+the Wayland display and an `eventfd`, allowing any thread to wake owner-thread
+task execution. Keyboard timers and the framework-facing shared-memory
+`RasterSurface` remain P1b.4b and P1b.4c.
 
 ## Build
 

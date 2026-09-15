@@ -27,9 +27,12 @@
 
 #include <linux/memfd.h>
 #include <linux/input-event-codes.h>
+#include <poll.h>
+#include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <system_error>
 #include <unistd.h>
 
 namespace dui::platform {
@@ -46,10 +49,21 @@ struct GlobalOffer {
 
 class WaylandTaskRunner final : public TaskRunner {
 public:
-  WaylandTaskRunner() : owner_(std::this_thread::get_id()) {}
+  WaylandTaskRunner()
+    : owner_(std::this_thread::get_id()), wake_fd_(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)) {
+    if (wake_fd_ < 0) {
+      throw std::system_error(errno, std::system_category(), "Could not create Wayland wake fd");
+    }
+  }
+
+  ~WaylandTaskRunner() override { close(wake_fd_); }
 
   void post(Task task) override {
     std::lock_guard lock{mutex_};
+    if (closed_) {
+      throw std::logic_error("Wayland task runner is closed");
+    }
+    signal();
     tasks_.push_back(std::move(task));
   }
 
@@ -65,6 +79,7 @@ public:
       Task task;
       {
         std::lock_guard lock{mutex_};
+        consume_wake();
         if (tasks_.empty()) {
           return;
         }
@@ -74,6 +89,13 @@ public:
       task();
     }
   }
+
+  void close_runner() noexcept {
+    std::lock_guard lock{mutex_};
+    closed_ = true;
+  }
+
+  [[nodiscard]] int wake_fd() const noexcept { return wake_fd_; }
 
   void drain_shutdown_batch() noexcept {
     std::size_t remaining{};
@@ -100,9 +122,37 @@ public:
   }
 
 private:
+  void signal() {
+    const eventfd_t value = 1;
+    while (eventfd_write(wake_fd_, value) != 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      if (errno == EAGAIN) {
+        return;
+      }
+      throw std::system_error(errno, std::system_category(), "Could not wake Wayland task runner");
+    }
+  }
+
+  void consume_wake() {
+    eventfd_t value{};
+    while (eventfd_read(wake_fd_, &value) != 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      if (errno == EAGAIN) {
+        return;
+      }
+      throw std::system_error(errno, std::system_category(), "Could not drain Wayland wake fd");
+    }
+  }
+
   std::thread::id owner_;
+  int wake_fd_{};
   std::mutex mutex_;
   std::deque<Task> tasks_;
+  bool closed_{};
 };
 
 std::optional<GlobalKind> global_kind(const char* interface) noexcept {
@@ -221,6 +271,8 @@ struct WaylandConnection::Impl {
     if (std::this_thread::get_id() != owner || active_windows != 0) {
       std::terminate();
     }
+    runner->close_runner();
+    runner->drain_shutdown_batch();
     outputs.clear();
     if (fractional_scale != nullptr) {
       wp_fractional_scale_manager_v1_destroy(fractional_scale);
@@ -1326,11 +1378,80 @@ void WaylandConnection::run_pending() {
 void WaylandConnection::dispatch() {
   impl_->require_owner();
   impl_->runner->run_pending();
-  if (wl_display_dispatch(impl_->display) < 0 || impl_->callback_failed) {
-    impl_->fail_transport();
-    throw std::runtime_error("Wayland display dispatch failed");
+
+  while (wl_display_prepare_read(impl_->display) != 0) {
+    if (wl_display_dispatch_pending(impl_->display) < 0 || impl_->callback_failed) {
+      impl_->fail_transport();
+      throw std::runtime_error("Wayland pending-event dispatch failed");
+    }
+    impl_->runner->run_pending();
   }
-  impl_->runner->run_pending();
+
+  bool prepared = true;
+  const auto cancel_read = [&] {
+    if (prepared) {
+      wl_display_cancel_read(impl_->display);
+      prepared = false;
+    }
+  };
+  bool wait_for_write{};
+  while (true) {
+    if (wl_display_flush(impl_->display) < 0) {
+      if (errno == EAGAIN) {
+        wait_for_write = true;
+      } else {
+        cancel_read();
+        impl_->fail_transport();
+        throw std::runtime_error("Wayland display flush failed");
+      }
+    } else {
+      wait_for_write = false;
+    }
+
+    std::array<pollfd, 2> descriptors{{
+      {wl_display_get_fd(impl_->display),
+       static_cast<short>(POLLIN | (wait_for_write ? POLLOUT : 0)), 0},
+      {impl_->runner->wake_fd(), POLLIN, 0},
+    }};
+    int result{};
+    do {
+      result = poll(descriptors.data(), descriptors.size(), -1);
+    } while (result < 0 && errno == EINTR);
+    constexpr short failure_events = POLLERR | POLLHUP | POLLNVAL;
+    if (result < 0 || (descriptors[0].revents & failure_events) != 0 ||
+        (descriptors[1].revents & failure_events) != 0) {
+      cancel_read();
+      impl_->fail_transport();
+      throw std::runtime_error("Wayland display poll failed");
+    }
+
+    if (wait_for_write && (descriptors[0].revents & POLLOUT) != 0) {
+      const int flush_result = wl_display_flush(impl_->display);
+      if (flush_result >= 0) {
+        wait_for_write = false;
+      } else if (errno != EAGAIN) {
+        cancel_read();
+        impl_->fail_transport();
+        throw std::runtime_error("Wayland display flush failed");
+      }
+    }
+
+    if ((descriptors[0].revents & POLLIN) != 0) {
+      prepared = false;
+      if (wl_display_read_events(impl_->display) < 0 ||
+          wl_display_dispatch_pending(impl_->display) < 0 || impl_->callback_failed) {
+        impl_->fail_transport();
+        throw std::runtime_error("Wayland display event read failed");
+      }
+      impl_->runner->run_pending();
+      return;
+    }
+    if ((descriptors[1].revents & POLLIN) != 0) {
+      cancel_read();
+      impl_->runner->run_pending();
+      return;
+    }
+  }
 }
 
 void WaylandConnection::roundtrip() {

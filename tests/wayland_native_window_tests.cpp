@@ -1,5 +1,6 @@
 #include "dui/platform/wayland_native.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <iostream>
@@ -87,12 +88,37 @@ int main() {
                                ", pending=" + (status.frame_callback_pending ? "true" : "false"));
     }
 
+    std::atomic<bool> cross_thread_task_ran{};
+    std::atomic<bool> task_ran_on_owner{};
+    const std::thread::id owner_thread = std::this_thread::get_id();
+    auto runner = connection->task_runner();
+    std::jthread worker{[runner, &cross_thread_task_ran, &task_ran_on_owner, owner_thread] {
+      std::this_thread::sleep_for(std::chrono::milliseconds{50});
+      runner->post([&cross_thread_task_ran, &task_ran_on_owner, owner_thread] {
+        task_ran_on_owner = std::this_thread::get_id() == owner_thread;
+        cross_thread_task_ran = true;
+      });
+    }};
+    while (!cross_thread_task_ran) {
+      connection->dispatch();
+    }
+    require(task_ran_on_owner, "cross-thread Wayland task did not run on the owner thread");
+
     delegate->on_shutdown = [&native_window] { native_window.reset(); };
     host_window.shutdown();
     connection->run_pending();
     require(!host_window.valid() && delegate->shutdown && native_window == nullptr,
             "Wayland host shutdown did not survive reentrant native-window destruction");
     connection->roundtrip();
+    connection.reset();
+    bool retired_runner_rejected_post{};
+    try {
+      runner->post([] {});
+    } catch (const std::logic_error&) {
+      retired_runner_rejected_post = true;
+    }
+    require(retired_runner_rejected_post,
+            "retained Wayland task runner accepted work after connection shutdown");
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';
     return 1;

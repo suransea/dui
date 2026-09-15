@@ -251,6 +251,21 @@ before their seat. Native compilation against xkbcommon is H1. Injected
 keyboard-event H2 and client-timer repeat generation remain pending; the latter
 joins the wakeable event-loop work in P1b.4.
 
+## P1b.4a: Wakeable Wayland Dispatch
+
+Status: implemented; CI H1/H2 verification is pending.
+
+The connection task runner owns a nonblocking close-on-exec `eventfd`. Posts
+from any thread signal and enqueue atomically with respect to owner draining,
+while runner closure rejects new work and retained handles remain safe after
+connection destruction. Connection dispatch uses Wayland's prepared-read
+sequence, flushes with writable backpressure, polls display and wake fds,
+dispatches native events before wake tasks when both are ready, and cancels
+every prepared read not consumed by `wl_display_read_events`. The Weston test
+posts from a worker while the owner dispatches, verifies owner-thread execution,
+and checks post rejection after connection shutdown. Keyboard repeat timers and
+the framework-facing shared-memory `RasterSurface` remain P1b.4b and P1b.4c.
+
 ## M0: Headless Architecture
 
 Status: implemented and verified.
