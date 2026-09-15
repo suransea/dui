@@ -1,5 +1,6 @@
 #include "dui/platform/wayland.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -133,6 +134,90 @@ std::optional<KeyEvent> WaylandKeyboardState::key_up(std::uint32_t key,
   std::string logical_key = std::move(pressed->second);
   pressed_.erase(pressed);
   return event(std::move(logical_key), KeyPhase::up, modifiers);
+}
+
+void WaylandRepeatState::advance_generation() {
+  if (generation_ == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error("Wayland repeat generation exhausted");
+  }
+  ++generation_;
+}
+
+void WaylandRepeatState::configure(std::int32_t rate, std::int32_t delay_milliseconds,
+                                   std::chrono::nanoseconds now) {
+  constexpr std::int64_t nanoseconds_per_second = 1'000'000'000;
+  if (rate < 0 || delay_milliseconds < 0 || now < std::chrono::nanoseconds::zero() ||
+      (candidate_.has_value() && now < key_down_time_)) {
+    throw std::invalid_argument("Invalid Wayland keyboard repeat information");
+  }
+  std::chrono::nanoseconds interval{};
+  if (rate != 0) {
+    const std::int64_t count = nanoseconds_per_second / rate;
+    if (count == 0) {
+      throw std::invalid_argument("Wayland keyboard repeat rate exceeds timer precision");
+    }
+    interval = std::chrono::nanoseconds{count};
+  }
+  const auto delay = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    std::chrono::milliseconds{delay_milliseconds});
+  if (interval_ == interval && delay_ == delay) {
+    return;
+  }
+  advance_generation();
+  interval_ = interval;
+  delay_ = delay;
+}
+
+void WaylandRepeatState::key_down(std::uint32_t key, bool repeatable,
+                                  std::chrono::nanoseconds now) {
+  if (now < std::chrono::nanoseconds::zero()) {
+    throw std::invalid_argument("Wayland repeat key time must be nonnegative");
+  }
+  if (!repeatable) {
+    return;
+  }
+  advance_generation();
+  candidate_ = key;
+  key_down_time_ = now;
+}
+
+void WaylandRepeatState::key_up(std::uint32_t key) {
+  if (candidate_ != key) {
+    return;
+  }
+  advance_generation();
+  candidate_.reset();
+}
+
+void WaylandRepeatState::cancel() {
+  if (!candidate_.has_value()) {
+    return;
+  }
+  advance_generation();
+  candidate_.reset();
+}
+
+std::optional<WaylandRepeatSchedule>
+WaylandRepeatState::schedule(std::chrono::nanoseconds now) const {
+  if (now < std::chrono::nanoseconds::zero() || (candidate_.has_value() && now < key_down_time_)) {
+    throw std::invalid_argument("Invalid Wayland repeat schedule time");
+  }
+  if (!candidate_.has_value() || interval_ == std::chrono::nanoseconds::zero()) {
+    return std::nullopt;
+  }
+  const auto elapsed = now - key_down_time_;
+  const auto remaining = elapsed < delay_ ? delay_ - elapsed : std::chrono::nanoseconds{1};
+  return WaylandRepeatSchedule{*candidate_, std::max(remaining, std::chrono::nanoseconds{1}),
+                               interval_, generation_};
+}
+
+std::uint64_t WaylandRepeatState::delivery_count(std::uint64_t expirations,
+                                                 std::uint64_t generation) const noexcept {
+  if (!candidate_.has_value() || interval_ == std::chrono::nanoseconds::zero() ||
+      generation != generation_) {
+    return 0;
+  }
+  return std::min(expirations, maximum_events_per_dispatch);
 }
 
 bool WaylandCommit::valid() const noexcept {

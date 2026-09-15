@@ -2,6 +2,7 @@
 
 #include "dui/input.hpp"
 
+#include <chrono>
 #include <compare>
 #include <cstdint>
 #include <limits>
@@ -86,6 +87,40 @@ private:
 
   std::unordered_map<std::uint32_t, std::string> pressed_;
   bool focused_{};
+};
+
+struct WaylandRepeatSchedule {
+  std::uint32_t key{};
+  std::chrono::nanoseconds delay{};
+  std::chrono::nanoseconds interval{};
+  std::uint64_t generation{};
+
+  friend constexpr bool operator==(WaylandRepeatSchedule, WaylandRepeatSchedule) = default;
+};
+
+class WaylandRepeatState {
+public:
+  static constexpr std::uint64_t maximum_events_per_dispatch = 16;
+
+  void configure(std::int32_t rate, std::int32_t delay_milliseconds, std::chrono::nanoseconds now);
+  void key_down(std::uint32_t key, bool repeatable, std::chrono::nanoseconds now);
+  void key_up(std::uint32_t key);
+  void cancel();
+
+  [[nodiscard]] std::optional<WaylandRepeatSchedule> schedule(std::chrono::nanoseconds now) const;
+  [[nodiscard]] std::uint64_t delivery_count(std::uint64_t expirations,
+                                             std::uint64_t generation) const noexcept;
+  [[nodiscard]] std::optional<std::uint32_t> candidate() const noexcept { return candidate_; }
+  [[nodiscard]] std::uint64_t generation() const noexcept { return generation_; }
+
+private:
+  void advance_generation();
+
+  std::optional<std::uint32_t> candidate_;
+  std::chrono::nanoseconds key_down_time_{};
+  std::chrono::nanoseconds delay_{};
+  std::chrono::nanoseconds interval_{};
+  std::uint64_t generation_{1};
 };
 
 // Platform-neutral protocol state used by the native Wayland adapter. All

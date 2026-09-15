@@ -248,8 +248,7 @@ classification at H0. The native adapter validates and privately maps bounded
 XKB V1 keymap fds, transactionally replaces context/keymap/state, translates
 canonical logical keys and effective modifiers, and tears keyboard children down
 before their seat. Native compilation against xkbcommon is H1. Injected
-keyboard-event H2 and client-timer repeat generation remain pending; the latter
-joins the wakeable event-loop work in P1b.4.
+keyboard-event H2 remains pending.
 
 ## P1b.4a: Wakeable Wayland Dispatch
 
@@ -267,6 +266,22 @@ every prepared read not consumed by `wl_display_read_events`. The Weston test
 posts from a worker while the owner dispatches, verifies owner-thread execution,
 and checks post rejection after connection shutdown. Keyboard repeat timers and
 the framework-facing shared-memory `RasterSurface` remain P1b.4b and P1b.4c.
+
+## P1b.4b: Wayland Keyboard Repeat
+
+Status: implemented with H0 policy coverage; CI H1 native compilation is
+pending. Injected keyboard-repeat H2 remains pending.
+
+`WaylandRepeatState` transactionally validates compositor timing, retains the
+newest repeatable candidate and its monotonic key-down time, preserves it across
+non-repeatable keys, and invalidates stale timer generations on replacement,
+release, focus/capability loss, or keymap replacement. It caps each expiration
+batch at 16 events. The native window owns a monotonic nonblocking `timerfd`,
+uses xkbcommon repeat eligibility, rearms from the original key-down time, and
+integrates timer readiness after display-event dispatch so cancellation wins.
+Repeat events reuse the held logical identity and current effective modifiers.
+Without a compositor-side keyboard injector, this is H0/H1 rather than H2.
+The framework-facing shared-memory `RasterSurface` remains P1b.4c.
 
 ## M0: Headless Architecture
 

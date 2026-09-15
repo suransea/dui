@@ -32,6 +32,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/timerfd.h>
 #include <system_error>
 #include <unistd.h>
 
@@ -264,6 +265,9 @@ struct WaylandConnection::Impl {
   bool transport_failed{};
   void (*active_output_changed)(void*, wl_output*, bool) noexcept {};
   void (*active_seat_changed)(void*, std::uint32_t) noexcept {};
+  int (*active_repeat_fd)(void*) noexcept {};
+  std::uint64_t (*active_repeat_generation)(void*) noexcept {};
+  void (*active_repeat_ready)(void*, std::uint64_t) noexcept {};
   bool active_pointer_child{};
   bool active_keyboard_child{};
 
@@ -696,6 +700,7 @@ struct WaylandWindow::Impl {
   xkb_context* xkb_context_handle{};
   xkb_keymap* xkb_keymap_handle{};
   xkb_state* xkb_state_handle{};
+  int repeat_fd{-1};
   std::shared_ptr<Control> control;
   HostWindowEndpoints endpoints;
   std::vector<std::unique_ptr<Buffer>> buffers;
@@ -710,15 +715,19 @@ struct WaylandWindow::Impl {
   std::vector<wl_output*> entered_outputs;
   WaylandPointerState pointer_state;
   WaylandKeyboardState keyboard_state;
-  std::int32_t repeat_rate{};
-  std::int32_t repeat_delay{};
+  WaylandRepeatState repeat_state;
   bool native_running{true};
   bool registered{};
 
   Impl(WaylandConnection::Impl& connection_value, WaylandExtent initial_extent)
     : connection(&connection_value),
       surface_state(initial_extent, connection_value.viewporter != nullptr &&
-                                      connection_value.fractional_scale != nullptr) {}
+                                      connection_value.fractional_scale != nullptr) {
+    repeat_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+    if (repeat_fd < 0) {
+      throw std::system_error(errno, std::system_category(), "Could not create Wayland repeat fd");
+    }
+  }
 
   ~Impl() {
     if (std::this_thread::get_id() != connection->owner) {
@@ -736,6 +745,9 @@ struct WaylandWindow::Impl {
       connection->fail_active_window = nullptr;
       connection->active_output_changed = nullptr;
       connection->active_seat_changed = nullptr;
+      connection->active_repeat_fd = nullptr;
+      connection->active_repeat_generation = nullptr;
+      connection->active_repeat_ready = nullptr;
       if (!connection->transport_failed) {
         for (std::uint32_t& name : connection->deferred_removals) {
           if (name != 0) {
@@ -745,6 +757,7 @@ struct WaylandWindow::Impl {
         }
       }
     }
+    close(repeat_fd);
   }
 
   std::unique_ptr<Buffer> create_buffer(WaylandExtent extent, std::uint64_t generation) {
@@ -987,7 +1000,82 @@ struct WaylandWindow::Impl {
     pointer = nullptr;
   }
 
+  static std::chrono::nanoseconds monotonic_now() noexcept {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch());
+  }
+
+  static timespec timer_value(std::chrono::nanoseconds value) noexcept {
+    constexpr std::int64_t nanoseconds_per_second = 1'000'000'000;
+    const std::int64_t count = value.count();
+    return {static_cast<time_t>(count / nanoseconds_per_second),
+            static_cast<long>(count % nanoseconds_per_second)};
+  }
+
+  void sync_repeat_timer(std::chrono::nanoseconds now) {
+    itimerspec timer{};
+    if (const auto schedule = repeat_state.schedule(now); schedule.has_value()) {
+      timer.it_value = timer_value(schedule->delay);
+      timer.it_interval = timer_value(schedule->interval);
+    }
+    if (timerfd_settime(repeat_fd, 0, &timer, nullptr) != 0) {
+      throw std::system_error(errno, std::system_category(),
+                              "Could not configure Wayland repeat timer");
+    }
+  }
+
+  void cancel_repeat() {
+    repeat_state.cancel();
+    sync_repeat_timer(monotonic_now());
+  }
+
+  void cancel_repeat_noexcept() noexcept {
+    try {
+      cancel_repeat();
+    } catch (...) {
+      if (native_running) {
+        fail_native();
+      }
+    }
+  }
+
+  void repeat_ready(std::uint64_t generation) noexcept {
+    if (generation != repeat_state.generation()) {
+      return;
+    }
+    std::uint64_t expirations{};
+    ssize_t read_size{};
+    do {
+      read_size = read(repeat_fd, &expirations, sizeof(expirations));
+    } while (read_size < 0 && errno == EINTR);
+    if (read_size < 0 && errno == EAGAIN) {
+      return;
+    }
+    if (read_size != static_cast<ssize_t>(sizeof(expirations))) {
+      fail_native();
+      return;
+    }
+    if (generation != repeat_state.generation()) {
+      return;
+    }
+    const auto key = repeat_state.candidate();
+    if (!key.has_value()) {
+      return;
+    }
+    try {
+      const std::uint64_t count = repeat_state.delivery_count(expirations, generation);
+      for (std::uint64_t index = 0; index < count; ++index) {
+        if (const auto event = keyboard_state.key_repeat(*key, modifiers()); event.has_value()) {
+          endpoints.driver.send_key(*event);
+        }
+      }
+    } catch (...) {
+      fail_native();
+    }
+  }
+
   void destroy_xkb() noexcept {
+    cancel_repeat_noexcept();
     if (xkb_state_handle != nullptr) {
       xkb_state_unref(xkb_state_handle);
       xkb_state_handle = nullptr;
@@ -1004,6 +1092,7 @@ struct WaylandWindow::Impl {
   }
 
   void destroy_keyboard() noexcept {
+    cancel_repeat_noexcept();
     if (keyboard_state.focused()) {
       keyboard_state.focus_lost();
       endpoints.driver.set_focused(false);
@@ -1261,8 +1350,13 @@ struct WaylandWindow::Impl {
                                     wl_surface* surface) noexcept {
     auto& self = *static_cast<Impl*>(data);
     if (surface == self.surface) {
-      self.keyboard_state.focus_lost();
-      self.endpoints.driver.set_focused(false);
+      try {
+        self.cancel_repeat();
+        self.keyboard_state.focus_lost();
+        self.endpoints.driver.set_focused(false);
+      } catch (...) {
+        self.fail_native();
+      }
     }
   }
 
@@ -1279,9 +1373,21 @@ struct WaylandWindow::Impl {
         const auto event =
           self.keyboard_state.key_down(key, self.logical_key(xkb_key), self.modifiers());
         if (event.has_value()) {
+          const auto now = self.monotonic_now();
+          const std::uint64_t repeat_generation = self.repeat_state.generation();
+          self.repeat_state.key_down(
+            key, xkb_keymap_key_repeats(self.xkb_keymap_handle, xkb_key) > 0, now);
+          if (self.repeat_state.generation() != repeat_generation) {
+            self.sync_repeat_timer(now);
+          }
           self.endpoints.driver.send_key(*event);
         }
       } else if (state == WL_KEYBOARD_KEY_STATE_RELEASED) {
+        const std::uint64_t repeat_generation = self.repeat_state.generation();
+        self.repeat_state.key_up(key);
+        if (self.repeat_state.generation() != repeat_generation) {
+          self.sync_repeat_timer(self.monotonic_now());
+        }
         const auto event = self.keyboard_state.key_up(key, self.modifiers());
         if (event.has_value()) {
           self.endpoints.driver.send_key(*event);
@@ -1307,12 +1413,13 @@ struct WaylandWindow::Impl {
   static void handle_keyboard_repeat_info(void* data, wl_keyboard*, std::int32_t rate,
                                           std::int32_t delay) noexcept {
     auto& self = *static_cast<Impl*>(data);
-    if (rate < 0 || delay < 0) {
+    try {
+      const auto now = self.monotonic_now();
+      self.repeat_state.configure(rate, delay, now);
+      self.sync_repeat_timer(now);
+    } catch (...) {
       self.fail_native();
-      return;
     }
-    self.repeat_rate = rate;
-    self.repeat_delay = delay;
   }
 
   static void handle_toplevel_configure(void* data, xdg_toplevel*, std::int32_t width,
@@ -1408,10 +1515,18 @@ void WaylandConnection::dispatch() {
       wait_for_write = false;
     }
 
-    std::array<pollfd, 2> descriptors{{
+    const int repeat_fd = impl_->active_window != nullptr && impl_->active_repeat_fd != nullptr
+                            ? impl_->active_repeat_fd(impl_->active_window)
+                            : -1;
+    const std::uint64_t repeat_generation =
+      impl_->active_window != nullptr && impl_->active_repeat_generation != nullptr
+        ? impl_->active_repeat_generation(impl_->active_window)
+        : 0;
+    std::array<pollfd, 3> descriptors{{
       {wl_display_get_fd(impl_->display),
        static_cast<short>(POLLIN | (wait_for_write ? POLLOUT : 0)), 0},
       {impl_->runner->wake_fd(), POLLIN, 0},
+      {repeat_fd, POLLIN, 0},
     }};
     int result{};
     do {
@@ -1419,7 +1534,8 @@ void WaylandConnection::dispatch() {
     } while (result < 0 && errno == EINTR);
     constexpr short failure_events = POLLERR | POLLHUP | POLLNVAL;
     if (result < 0 || (descriptors[0].revents & failure_events) != 0 ||
-        (descriptors[1].revents & failure_events) != 0) {
+        (descriptors[1].revents & failure_events) != 0 ||
+        (descriptors[2].revents & failure_events) != 0) {
       cancel_read();
       impl_->fail_transport();
       throw std::runtime_error("Wayland display poll failed");
@@ -1442,6 +1558,18 @@ void WaylandConnection::dispatch() {
           wl_display_dispatch_pending(impl_->display) < 0 || impl_->callback_failed) {
         impl_->fail_transport();
         throw std::runtime_error("Wayland display event read failed");
+      }
+      if ((descriptors[2].revents & POLLIN) != 0 && impl_->active_window != nullptr &&
+          impl_->active_repeat_ready != nullptr) {
+        impl_->active_repeat_ready(impl_->active_window, repeat_generation);
+      }
+      impl_->runner->run_pending();
+      return;
+    }
+    if ((descriptors[2].revents & POLLIN) != 0) {
+      cancel_read();
+      if (impl_->active_window != nullptr && impl_->active_repeat_ready != nullptr) {
+        impl_->active_repeat_ready(impl_->active_window, repeat_generation);
       }
       impl_->runner->run_pending();
       return;
@@ -1506,6 +1634,15 @@ std::unique_ptr<WaylandWindow> WaylandWindow::create(WaylandConnection& connecti
     auto& impl = *static_cast<Impl*>(window);
     impl.seat_pointer_capabilities_changed(capabilities);
     impl.seat_keyboard_capabilities_changed(capabilities);
+  };
+  connection.impl_->active_repeat_fd = [](void* window) noexcept {
+    return static_cast<Impl*>(window)->repeat_fd;
+  };
+  connection.impl_->active_repeat_generation = [](void* window) noexcept {
+    return static_cast<Impl*>(window)->repeat_state.generation();
+  };
+  connection.impl_->active_repeat_ready = [](void* window, std::uint64_t generation) noexcept {
+    static_cast<Impl*>(window)->repeat_ready(generation);
   };
   impl->surface = wl_compositor_create_surface(connection.impl_->compositor);
   if (impl->surface == nullptr) {

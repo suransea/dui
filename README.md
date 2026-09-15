@@ -188,12 +188,12 @@ Its platform-neutral state tests cover complete and canceled pointer streams;
 native event H2 remains pending a compositor-side input injector.
 P1b.3b adds bounded transactional XKB V1 keymaps, keyboard focus, canonical
 logical key translation, effective modifiers, and stable down/repeat/up
-identity. Client-timer repeat generation and injected keyboard H2 remain later
-work.
+identity. Injected keyboard-event H2 remains later work.
 P1b.4a replaces blocking display-only dispatch with a prepared-read poll over
 the Wayland display and an `eventfd`, allowing any thread to wake owner-thread
-task execution. Keyboard timers and the framework-facing shared-memory
-`RasterSurface` remain P1b.4b and P1b.4c.
+task execution. P1b.4b adds generation-checked, bounded client repeat through a
+monotonic `timerfd`; injected repeat H2 remains pending. The framework-facing
+shared-memory `RasterSurface` remains P1b.4c.
 
 ## Build
 

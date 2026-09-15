@@ -274,6 +274,68 @@ void keyboard_state_preserves_logical_identity_and_focus() {
           "keyboard focus loss retained held-key state");
 }
 
+void keyboard_repeat_policy_is_bounded_and_generation_checked() {
+  using namespace std::chrono_literals;
+  using dui::platform::WaylandRepeatSchedule;
+  using dui::platform::WaylandRepeatState;
+
+  WaylandRepeatState state;
+  require(throws<std::invalid_argument>([&] { state.configure(-1, 10, 0ns); }) &&
+            throws<std::invalid_argument>([&] { state.configure(10, -1, 0ns); }) &&
+            throws<std::invalid_argument>([&] { state.configure(1'000'000'001, 10, 0ns); }),
+          "invalid keyboard repeat timing was accepted");
+  state.configure(1'000'000'000, 0, 0ns);
+  state.key_down(29, true, 0ns);
+  const auto precision_boundary = state.schedule(0ns);
+  require(precision_boundary.has_value() && precision_boundary->delay == 1ns &&
+            precision_boundary->interval == 1ns &&
+            state.delivery_count(0, precision_boundary->generation) == 0,
+          "one-nanosecond repeat boundary was not represented exactly");
+  state.cancel();
+  state.configure(25, 400, 0ns);
+  state.key_down(30, true, 1s);
+  const auto initial = state.schedule(1s);
+  require(initial == WaylandRepeatSchedule{30, 400ms, 40ms, state.generation()},
+          "repeat key did not retain compositor timing");
+
+  state.key_down(31, false, 1100ms);
+  require(state.candidate() == 30 && state.schedule(1200ms)->delay == 200ms,
+          "non-repeatable key replaced the repeat candidate");
+  state.key_up(31);
+  require(state.candidate() == 30, "non-candidate key release canceled repeat");
+
+  state.configure(50, 100, 1250ms);
+  const auto replacement = state.schedule(1250ms);
+  require(replacement.has_value() && replacement->key == 30 && replacement->delay == 1ns &&
+            replacement->interval == 20ms,
+          "repeat-info replacement restarted delay from update time");
+  require(state.delivery_count(100, replacement->generation) ==
+            WaylandRepeatState::maximum_events_per_dispatch,
+          "coalesced repeat delivery was not bounded");
+
+  const std::uint64_t stale_generation = replacement->generation;
+  state.key_down(32, true, 1300ms);
+  require(state.delivery_count(1, stale_generation) == 0 && state.candidate() == 32,
+          "replaced repeat generation remained deliverable");
+  state.configure(0, 100, 1300ms);
+  require(!state.schedule(1300ms).has_value() && state.candidate() == 32,
+          "zero rate did not disable repeat while retaining its candidate");
+  state.configure(10, 100, 1350ms);
+  require(state.schedule(1350ms)->delay == 50ms,
+          "positive repeat-info did not rearm from original key-down time");
+  state.key_up(32);
+  require(!state.candidate().has_value() && !state.schedule(1400ms).has_value(),
+          "active key release did not cancel repeat");
+
+  state.key_down(33, true, 1500ms);
+  const std::uint64_t canceled_generation = state.generation();
+  state.cancel();
+  require(!state.candidate().has_value() && state.delivery_count(1, canceled_generation) == 0,
+          "focus or keymap cancellation retained repeat state");
+  require(throws<std::invalid_argument>([&] { state.key_down(34, true, -1ns); }),
+          "negative monotonic key time was accepted");
+}
+
 } // namespace
 
 int main() {
@@ -285,6 +347,7 @@ int main() {
     scale_changes_replace_frames_without_accepting_stale_generations();
     primary_pointer_state_preserves_stream_invariants();
     keyboard_state_preserves_logical_identity_and_focus();
+    keyboard_repeat_policy_is_bounded_and_generation_checked();
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';
     return 1;
