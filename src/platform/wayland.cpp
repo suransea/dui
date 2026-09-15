@@ -1,5 +1,6 @@
 #include "dui/platform/wayland.hpp"
 
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 
@@ -19,6 +20,68 @@ std::uint32_t checked_buffer_dimension(std::uint32_t logical, std::uint64_t nume
 }
 
 } // namespace
+
+WaylandPointerState::WaylandPointerState(PointerId pointer) : pointer_(pointer) {
+  if (pointer_ == 0) {
+    throw std::invalid_argument("Wayland pointer ID must be non-zero");
+  }
+}
+
+void WaylandPointerState::set_position(double x, double y) {
+  if (!std::isfinite(x) || !std::isfinite(y)) {
+    throw std::invalid_argument("Wayland pointer coordinates must be finite");
+  }
+  position_ = {x, y};
+}
+
+void WaylandPointerState::enter(double x, double y) {
+  set_position(x, y);
+  focused_ = true;
+}
+
+std::optional<PointerEvent> WaylandPointerState::leave() noexcept {
+  focused_ = false;
+  if (!active_) {
+    return std::nullopt;
+  }
+  active_ = false;
+  return PointerEvent{pointer_, PointerPhase::cancel, position_};
+}
+
+std::optional<PointerEvent> WaylandPointerState::motion(double x, double y) {
+  set_position(x, y);
+  if (!focused_ || !active_) {
+    return std::nullopt;
+  }
+  return PointerEvent{pointer_, PointerPhase::move, position_};
+}
+
+std::optional<PointerEvent> WaylandPointerState::primary_button(bool pressed) {
+  if (pressed) {
+    if (!focused_) {
+      return std::nullopt;
+    }
+    if (active_) {
+      throw std::logic_error("Wayland primary pointer is already pressed");
+    }
+    active_ = true;
+    return PointerEvent{pointer_, PointerPhase::down, position_};
+  }
+  if (!active_) {
+    return std::nullopt;
+  }
+  active_ = false;
+  return PointerEvent{pointer_, PointerPhase::up, position_};
+}
+
+std::optional<PointerEvent> WaylandPointerState::capability_lost() noexcept {
+  focused_ = false;
+  if (!active_) {
+    return std::nullopt;
+  }
+  active_ = false;
+  return PointerEvent{pointer_, PointerPhase::cancel, position_};
+}
 
 bool WaylandCommit::valid() const noexcept {
   if (generation == 0 || state_revision == 0 || !logical_extent.valid() || !buffer_extent.valid() ||

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "dui/input.hpp"
+
 #include <compare>
 #include <cstdint>
 #include <limits>
@@ -31,6 +33,29 @@ struct WaylandCommit {
 
   [[nodiscard]] bool valid() const noexcept;
   friend constexpr bool operator==(const WaylandCommit&, const WaylandCommit&) = default;
+};
+
+class WaylandPointerState {
+public:
+  explicit WaylandPointerState(PointerId pointer = 1);
+
+  void enter(double x, double y);
+  [[nodiscard]] std::optional<PointerEvent> leave() noexcept;
+  [[nodiscard]] std::optional<PointerEvent> motion(double x, double y);
+  [[nodiscard]] std::optional<PointerEvent> primary_button(bool pressed);
+  [[nodiscard]] std::optional<PointerEvent> capability_lost() noexcept;
+
+  [[nodiscard]] bool focused() const noexcept { return focused_; }
+  [[nodiscard]] bool active() const noexcept { return active_; }
+  [[nodiscard]] Offset position() const noexcept { return position_; }
+
+private:
+  void set_position(double x, double y);
+
+  PointerId pointer_;
+  Offset position_;
+  bool focused_{};
+  bool active_{};
 };
 
 // Platform-neutral protocol state used by the native Wayland adapter. All

@@ -197,6 +197,48 @@ void scale_changes_replace_frames_without_accepting_stale_generations() {
           "scaled frame demand did not resume after the old callback");
 }
 
+void primary_pointer_state_preserves_stream_invariants() {
+  using dui::PointerEvent;
+  using dui::PointerPhase;
+  using dui::platform::WaylandPointerState;
+
+  require(throws<std::invalid_argument>([] { WaylandPointerState state{0}; }),
+          "zero Wayland pointer ID was accepted");
+  WaylandPointerState state{7};
+  require(!state.motion(1.0, 2.0).has_value() && !state.primary_button(false).has_value(),
+          "unfocused motion or unmatched release invented a stream");
+  state.enter(3.0, 4.0);
+  const auto down = state.primary_button(true);
+  const auto move = state.motion(5.0, 6.0);
+  require(down == PointerEvent{7, PointerPhase::down, {3.0, 4.0}} &&
+            move == PointerEvent{7, PointerPhase::move, {5.0, 6.0}} && state.active(),
+          "focused primary pointer did not preserve position or phase");
+  require(throws<std::logic_error>([&] { static_cast<void>(state.primary_button(true)); }),
+          "duplicate primary press was accepted");
+  const auto cancel = state.leave();
+  require(cancel == PointerEvent{7, PointerPhase::cancel, {5.0, 6.0}} && !state.focused() &&
+            !state.active(),
+          "surface leave did not cancel the active pointer");
+
+  state.enter(7.0, 8.0);
+  require(!state.primary_button(false).has_value(),
+          "focused unmatched release invented a pointer stream");
+  static_cast<void>(state.primary_button(true));
+  const auto second_move = state.motion(9.0, 10.0);
+  const auto up = state.primary_button(false);
+  require(second_move == PointerEvent{7, PointerPhase::move, {9.0, 10.0}} &&
+            up == PointerEvent{7, PointerPhase::up, {9.0, 10.0}} && !state.active(),
+          "primary pointer did not complete a normal down/move/up stream");
+  static_cast<void>(state.primary_button(true));
+  const auto lost = state.capability_lost();
+  require(lost == PointerEvent{7, PointerPhase::cancel, {9.0, 10.0}} &&
+            !state.capability_lost().has_value(),
+          "capability loss did not emit exactly one cancellation");
+  require(throws<std::invalid_argument>(
+            [&] { state.enter(std::numeric_limits<double>::infinity(), 0.0); }),
+          "non-finite pointer coordinates were accepted");
+}
+
 } // namespace
 
 int main() {
@@ -206,6 +248,7 @@ int main() {
     integer_and_fractional_scaling_are_explicit();
     frame_callbacks_gate_content_without_blocking_configure();
     scale_changes_replace_frames_without_accepting_stale_generations();
+    primary_pointer_state_preserves_stream_invariants();
   } catch (const std::exception& error) {
     std::cerr << "FAILED: " << error.what() << '\n';
     return 1;

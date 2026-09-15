@@ -24,6 +24,7 @@
 #include <vector>
 
 #include <linux/memfd.h>
+#include <linux/input-event-codes.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -209,6 +210,8 @@ struct WaylandConnection::Impl {
   std::vector<std::unique_ptr<Output>> outputs;
   bool transport_failed{};
   void (*active_output_changed)(void*, wl_output*, bool) noexcept {};
+  void (*active_seat_changed)(void*, std::uint32_t) noexcept {};
+  bool active_pointer_child{};
 
   ~Impl() {
     if (std::this_thread::get_id() != owner || active_windows != 0) {
@@ -222,7 +225,11 @@ struct WaylandConnection::Impl {
       wp_viewporter_destroy(viewporter);
     }
     if (seat != nullptr) {
-      wl_seat_destroy(seat);
+      if (globals.seat_version >= WL_SEAT_RELEASE_SINCE_VERSION) {
+        wl_seat_release(seat);
+      } else {
+        wl_seat_destroy(seat);
+      }
     }
     if (wm_base != nullptr) {
       xdg_wm_base_destroy(wm_base);
@@ -260,6 +267,13 @@ struct WaylandConnection::Impl {
   void notify_output(wl_output* output, bool removed) noexcept {
     if (active_window != nullptr && active_output_changed != nullptr) {
       active_output_changed(active_window, output, removed);
+    }
+  }
+
+  void notify_seat(std::uint32_t capabilities) noexcept {
+    globals.seat_capabilities = capabilities;
+    if (active_window != nullptr && active_seat_changed != nullptr) {
+      active_seat_changed(active_window, capabilities);
     }
   }
 
@@ -322,8 +336,19 @@ struct WaylandConnection::Impl {
       seat =
         static_cast<wl_seat*>(wl_registry_bind(registry, name, &wl_seat_interface, negotiated));
       if (seat != nullptr) {
-        globals.seat_version = negotiated;
-        seat_name = name;
+        static constexpr wl_seat_listener listener{handle_seat_capabilities, handle_seat_name};
+        if (wl_seat_add_listener(seat, &listener, this) == 0) {
+          globals.seat_version = negotiated;
+          seat_name = name;
+        } else {
+          if (negotiated >= WL_SEAT_RELEASE_SINCE_VERSION) {
+            wl_seat_release(seat);
+          } else {
+            wl_seat_destroy(seat);
+          }
+          seat = nullptr;
+          callback_failed = true;
+        }
       } else {
         callback_failed = true;
       }
@@ -409,11 +434,15 @@ struct WaylandConnection::Impl {
       (kind == GlobalKind::shm && name == shm_name && shm != nullptr) ||
       (kind == GlobalKind::compositor && name == compositor_name && compositor != nullptr);
     const bool has_active_children =
-      kind == GlobalKind::compositor || kind == GlobalKind::shm || kind == GlobalKind::wm_base ||
+      kind == GlobalKind::compositor || kind == GlobalKind::shm ||
+      (kind == GlobalKind::seat && active_pointer_child) || kind == GlobalKind::wm_base ||
       kind == GlobalKind::viewporter || kind == GlobalKind::fractional_scale;
     if (selected && active_windows != 0 && has_active_children) {
       deferred_removals[static_cast<std::size_t>(kind)] = name;
       return;
+    }
+    if (selected && kind == GlobalKind::seat) {
+      notify_seat(0);
     }
     if (name == fractional_scale_name && fractional_scale != nullptr) {
       wp_fractional_scale_manager_v1_destroy(fractional_scale);
@@ -424,7 +453,11 @@ struct WaylandConnection::Impl {
       viewporter = nullptr;
       globals.viewporter_version = 0;
     } else if (name == seat_name && seat != nullptr) {
-      wl_seat_destroy(seat);
+      if (globals.seat_version >= WL_SEAT_RELEASE_SINCE_VERSION) {
+        wl_seat_release(seat);
+      } else {
+        wl_seat_destroy(seat);
+      }
       seat = nullptr;
       globals.seat_version = 0;
     } else if (name == wm_base_name && wm_base != nullptr) {
@@ -461,6 +494,12 @@ struct WaylandConnection::Impl {
   static void handle_ping(void*, xdg_wm_base* wm_base, std::uint32_t serial) noexcept {
     xdg_wm_base_pong(wm_base, serial);
   }
+
+  static void handle_seat_capabilities(void* data, wl_seat*, std::uint32_t capabilities) noexcept {
+    static_cast<Impl*>(data)->notify_seat(capabilities);
+  }
+
+  static void handle_seat_name(void*, wl_seat*, const char*) noexcept {}
 };
 
 struct WaylandWindow::Impl {
@@ -595,6 +634,7 @@ struct WaylandWindow::Impl {
   xdg_toplevel* toplevel{};
   wp_viewport* viewport{};
   wp_fractional_scale_v1* fractional_scale{};
+  wl_pointer* pointer{};
   std::shared_ptr<Control> control;
   HostWindowEndpoints endpoints;
   std::vector<std::unique_ptr<Buffer>> buffers;
@@ -607,6 +647,7 @@ struct WaylandWindow::Impl {
   std::uint32_t committed_scale{WaylandSurfaceState::scale_denominator};
   bool committed_with_viewporter{};
   std::vector<wl_output*> entered_outputs;
+  WaylandPointerState pointer_state;
   bool native_running{true};
   bool registered{};
 
@@ -630,6 +671,7 @@ struct WaylandWindow::Impl {
       connection->active_window = nullptr;
       connection->fail_active_window = nullptr;
       connection->active_output_changed = nullptr;
+      connection->active_seat_changed = nullptr;
       if (!connection->transport_failed) {
         for (std::uint32_t& name : connection->deferred_removals) {
           if (name != 0) {
@@ -764,6 +806,7 @@ struct WaylandWindow::Impl {
       return;
     }
     native_running = false;
+    destroy_pointer();
     frame.reset();
     buffers.clear();
     if (fractional_scale != nullptr) {
@@ -858,6 +901,118 @@ struct WaylandWindow::Impl {
       self.fail_native();
     }
   }
+
+  void send_pointer(std::optional<PointerEvent> event) noexcept {
+    if (event.has_value()) {
+      endpoints.driver.send_pointer(*event);
+    }
+  }
+
+  void destroy_pointer() noexcept {
+    send_pointer(pointer_state.capability_lost());
+    connection->active_pointer_child = false;
+    if (pointer == nullptr) {
+      return;
+    }
+    if (wl_pointer_get_version(pointer) >= WL_POINTER_RELEASE_SINCE_VERSION) {
+      wl_pointer_release(pointer);
+    } else {
+      wl_pointer_destroy(pointer);
+    }
+    pointer = nullptr;
+  }
+
+  void seat_capabilities_changed(std::uint32_t capabilities) noexcept {
+    const bool available = (capabilities & WL_SEAT_CAPABILITY_POINTER) != 0;
+    if (!available) {
+      destroy_pointer();
+      return;
+    }
+    if (pointer != nullptr || !native_running) {
+      return;
+    }
+    pointer = wl_seat_get_pointer(connection->seat);
+    if (pointer == nullptr) {
+      fail_native();
+      return;
+    }
+    connection->active_pointer_child = true;
+    static const wl_pointer_listener listener = [] {
+      wl_pointer_listener value{};
+      value.enter = handle_pointer_enter;
+      value.leave = handle_pointer_leave;
+      value.motion = handle_pointer_motion;
+      value.button = handle_pointer_button;
+      value.axis = handle_pointer_axis;
+      value.frame = handle_pointer_frame;
+      value.axis_source = handle_pointer_axis_source;
+      value.axis_stop = handle_pointer_axis_stop;
+      value.axis_discrete = handle_pointer_axis_discrete;
+      return value;
+    }();
+    if (wl_pointer_add_listener(pointer, &listener, this) != 0) {
+      destroy_pointer();
+      fail_native();
+    }
+  }
+
+  static void handle_pointer_enter(void* data, wl_pointer*, std::uint32_t, wl_surface* surface,
+                                   wl_fixed_t x, wl_fixed_t y) noexcept {
+    auto& self = *static_cast<Impl*>(data);
+    if (surface != self.surface) {
+      return;
+    }
+    try {
+      self.pointer_state.enter(wl_fixed_to_double(x), wl_fixed_to_double(y));
+    } catch (...) {
+      self.fail_native();
+    }
+  }
+
+  static void handle_pointer_leave(void* data, wl_pointer*, std::uint32_t,
+                                   wl_surface* surface) noexcept {
+    auto& self = *static_cast<Impl*>(data);
+    if (surface == self.surface) {
+      self.send_pointer(self.pointer_state.leave());
+    }
+  }
+
+  static void handle_pointer_motion(void* data, wl_pointer*, std::uint32_t, wl_fixed_t x,
+                                    wl_fixed_t y) noexcept {
+    auto& self = *static_cast<Impl*>(data);
+    try {
+      self.send_pointer(self.pointer_state.motion(wl_fixed_to_double(x), wl_fixed_to_double(y)));
+    } catch (...) {
+      self.fail_native();
+    }
+  }
+
+  static void handle_pointer_button(void* data, wl_pointer*, std::uint32_t, std::uint32_t,
+                                    std::uint32_t button, std::uint32_t state) noexcept {
+    if (button != BTN_LEFT) {
+      return;
+    }
+    auto& self = *static_cast<Impl*>(data);
+    try {
+      if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        self.send_pointer(self.pointer_state.primary_button(true));
+      } else if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
+        self.send_pointer(self.pointer_state.primary_button(false));
+      } else {
+        throw std::invalid_argument("Unknown Wayland pointer button state");
+      }
+    } catch (...) {
+      self.fail_native();
+    }
+  }
+
+  static void handle_pointer_axis(void*, wl_pointer*, std::uint32_t, std::uint32_t,
+                                  wl_fixed_t) noexcept {}
+  static void handle_pointer_frame(void*, wl_pointer*) noexcept {}
+  static void handle_pointer_axis_source(void*, wl_pointer*, std::uint32_t) noexcept {}
+  static void handle_pointer_axis_stop(void*, wl_pointer*, std::uint32_t, std::uint32_t) noexcept {}
+  static void handle_pointer_axis_discrete(void*, wl_pointer*, std::uint32_t,
+                                           std::int32_t) noexcept {}
 
   static void handle_toplevel_configure(void* data, xdg_toplevel*, std::int32_t width,
                                         std::int32_t height, wl_array*) noexcept {
@@ -977,6 +1132,9 @@ std::unique_ptr<WaylandWindow> WaylandWindow::create(WaylandConnection& connecti
                                                bool removed) noexcept {
     static_cast<Impl*>(window)->output_changed(output, removed);
   };
+  connection.impl_->active_seat_changed = [](void* window, std::uint32_t capabilities) noexcept {
+    static_cast<Impl*>(window)->seat_capabilities_changed(capabilities);
+  };
   impl->surface = wl_compositor_create_surface(connection.impl_->compositor);
   if (impl->surface == nullptr) {
     throw std::runtime_error("Could not create Wayland surface");
@@ -1032,6 +1190,7 @@ std::unique_ptr<WaylandWindow> WaylandWindow::create(WaylandConnection& connecti
     make_host_window(id, std::move(configuration), connection.impl_->runner,
                      connection.impl_->runner, impl->control, nullptr, std::move(error_handler));
   impl->endpoints.driver.set_surface_state(HostSurfaceState::available);
+  impl->seat_capabilities_changed(connection.impl_->globals.seat_capabilities);
   if (!impl->surface_state.begin_initial_commit()) {
     throw std::logic_error("Wayland initial commit state was already consumed");
   }
@@ -1053,7 +1212,7 @@ WaylandWindowStatus WaylandWindow::status() const {
   return {impl_->surface_state.configured(), impl_->committed_buffers,
           impl_->frame != nullptr,           impl_->committed_extent.width,
           impl_->committed_extent.height,    impl_->committed_scale,
-          impl_->committed_with_viewporter};
+          impl_->committed_with_viewporter,  impl_->pointer != nullptr};
 }
 
 } // namespace dui::platform

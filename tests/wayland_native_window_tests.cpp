@@ -62,6 +62,7 @@ int main() {
       std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
     const auto status = native_window->status();
+    const auto final_globals = connection->globals();
     require(delegate->created, "Wayland host did not create its framework delegate");
     require(status.configured && status.committed_buffers != 0,
             "xdg configure did not produce a diagnostic shared-memory buffer");
@@ -72,6 +73,8 @@ int main() {
     require(metrics.has_value() && metrics->physical_width == 640 &&
               metrics->physical_height == 400 && metrics->device_pixel_ratio == 2.0,
             "scaled Wayland commit did not publish matching host metrics");
+    require(status.pointer_available == final_globals.pointer_available(),
+            "Wayland pointer object did not follow the advertised seat capability");
     if (delegate->frames.size() != 1 || delegate->frames.front().window != dui::WindowId{1} ||
         delegate->frames.front().timestamp < std::chrono::nanoseconds::zero() ||
         delegate->frames.front().metrics.physical_width != 640 ||

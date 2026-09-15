@@ -218,17 +218,19 @@ recreation follow in P1b.4.
 
 ## P1b.3a: Wayland Primary Pointer
 
-Status: specified; implementation and native evidence pending.
+Status: implemented with H0 state coverage and local H1 native compilation.
+Injected pointer-event H2 remains pending.
 
 This slice maps one primary-button pointer stream into the existing host input
-contract. A platform-neutral state machine provides H0 coverage for finite
+contract. `WaylandPointerState` provides H0 coverage for finite
 coordinates, enter/leave focus, pressed motion, duplicate rejection, unmatched
 release recovery, and capability-loss cancellation. The native adapter listens
 to seat capabilities, owns at most one `wl_pointer`, filters focus to its own
 surface, and cancels before pointer or seat teardown. Since ordinary headless
 Weston does not itself prove injected pointer events, listener compilation is H1
-until CI has a real compositor-side input injector. Keyboard/xkbcommon follows
-as P1b.3b.
+until CI has a real compositor-side input injector. The compositor test only
+checks that native pointer-object ownership follows the advertised capability;
+it does not elevate pointer events to H2. Keyboard/xkbcommon follows as P1b.3b.
 
 ## M0: Headless Architecture
 

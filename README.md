@@ -183,6 +183,9 @@ P1b.2b tracks stable `wl_output` objects and applies the maximum entered-output
 integer scale, or compositor fractional scale through a per-window viewport
 when both optional protocols are advertised. Scale changes repaint the
 diagnostic buffer and publish matching physical metrics and device-pixel ratio.
+P1b.3a adds seat capability tracking and a primary-button `wl_pointer` adapter.
+Its platform-neutral state tests cover complete and canceled pointer streams;
+native event H2 remains pending a compositor-side input injector.
 
 ## Build
 
