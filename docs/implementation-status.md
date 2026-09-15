@@ -233,6 +233,19 @@ until CI has a real compositor-side input injector. The compositor test only
 checks that native pointer-object ownership follows the advertised capability;
 it does not elevate pointer events to H2. Keyboard/xkbcommon follows as P1b.3b.
 
+## P1b.3b: Wayland Keyboard And Xkbcommon
+
+Status: specified; implementation and evidence pending.
+
+This slice owns the keyboard capability object and transactional XKB V1 keymap
+fd replacement, maps native focus into `HostWindowDriver`, translates layout
+resolved printable and named keys, snapshots effective Shift/Control/Alt/Meta,
+and preserves logical identity from down through up. A platform-neutral held-key
+state covers duplicate, unmatched release, focus loss, and repeat
+classification at H0. Native compilation against xkbcommon is H1. Injected
+keyboard-event H2 and client-timer repeat generation remain pending; the latter
+joins the wakeable event-loop work in P1b.4.
+
 ## M0: Headless Architecture
 
 Status: implemented and verified.

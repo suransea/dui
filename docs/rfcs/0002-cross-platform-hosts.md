@@ -372,9 +372,30 @@ allocation and validation failures before entering `HostWindowDriver`.
 Executable state tests establish H0 and real SDK compilation establishes H1.
 Headless Weston establishes pointer H2 only when an input injector or advertised
 pointer capability actually drives enter, primary down, motion, up, and leave;
-mere seat discovery is not pointer H2. P1b.3b adds keyboard focus, keymap fd
-ownership, xkbcommon state/modifier translation, repeat classification, and the
-same capability-loss cancellation discipline.
+mere seat discovery is not pointer H2.
+
+P1b.3b adds a platform-neutral keyboard stream state and a native xkbcommon
+adapter. CMake requires `xkbcommon >= 1.0` for the native target. A keyboard
+capability creates at most one `wl_keyboard`; capability or seat loss retires it
+before its parent. XKB V1 keymap events validate a non-zero bounded size, map the
+fd privately, close it on every branch, and build context/keymap/state
+replacements completely before retiring the prior state. Unsupported formats or
+malformed maps terminate the native host. Enter for this window establishes host
+focus but does not synthesize downs for the compositor's unordered pre-held key
+array. Leave clears focus and held-key identity without inventing ups because
+`KeyEvent` has no cancellation phase. Keycodes add the protocol-required offset
+eight. Printable logical keys use layout-resolved UTF-8; named keys normalize at
+least Return, Escape, Backspace, Tab, and arrows, with the canonical XKB keysym
+name as fallback. Down stores logical identity, duplicate down is invalid, and
+up reuses that stored identity so intervening modifier changes cannot rename the
+release; unmatched up is ignored. Effective Shift, Control, Mod1, and Mod4 state
+populate framework modifiers from `wl_keyboard.modifiers`. Repeat metadata is
+validated and retained, but client-timer synthesis moves to P1b.4 with the
+wakeable event loop; a future compositor-provided repeated state maps directly
+to `KeyPhase::repeat` when a sufficiently new seat version is negotiated.
+Executable stream tests establish H0 and the real SDK build establishes H1.
+Keyboard H2 requires injected focus, keymap, modifier, down, and up events; seat
+or keyboard-object discovery alone is not H2.
 
 Implement the Wayland host first. The client performs an initial bufferless
 commit to trigger `xdg_surface.configure`, waits for configure, coalesces
